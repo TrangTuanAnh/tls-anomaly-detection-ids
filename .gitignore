@@ -1,4 +1,27 @@
+# Python rác
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenv
 venv/
-model-training/
+.venv/
+env/
+.env
+.env.*
+
+# Logs runtime Suricata: ignore hết, chỉ giữ .gitkeep
 shared/logs/suricata/*
 !shared/logs/suricata/.gitkeep
+
+# Dataset train
+model-training/dataset/*
+!model-training/dataset/.gitkeep
+
+# Editor / OS
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
