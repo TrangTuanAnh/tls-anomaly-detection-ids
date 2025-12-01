@@ -1,0 +1,81 @@
+%YAML 1.1
+---
+suricata-version: "8.0"
+
+vars:
+  address-groups:
+    HOME_NET: "any"
+    EXTERNAL_NET: "any"
+
+# LOG DIRECTORY TRONG CONTAINER
+default-log-dir: /var/log/suricata
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json # => /var/log/suricata/eve.json
+      buffer-size: 0
+      threaded: no
+      metadata: yes
+      types:
+        - tls:
+            enabled: yes
+            extended: yes
+            custom: [sni, version, ja3, ja3s]
+        - stats:
+            totals: yes
+            threads: no
+
+logging:
+  default-log-level: info
+  outputs:
+    - console:
+        enabled: yes
+    - file:
+        enabled: yes
+        filename: suricata.log # => /var/log/suricata/suricata.log
+
+pcap:
+  - interface: any
+    checksum-checks: auto
+
+af-packet: [] # tắt cho đỡ rối
+
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+      ja3-fingerprints: yes
+      ja4-fingerprints: yes
+
+    http:
+      enabled: yes
+
+    dns:
+      udp:
+        enabled: yes
+        detection-ports:
+          dp: 53
+      tcp:
+        enabled: yes
+        detection-ports:
+          dp: 53
+
+flow:
+  memcap: 64 MiB
+
+stream:
+  memcap: 64 MiB
+  reassembly:
+    memcap: 128 MiB
+    depth: 1 MiB
+
+threading:
+  set-cpu-affinity: no
+  detect-thread-ratio: 1.0
+
+default-rule-path: /var/lib/suricata/rules
+rule-files: []
