@@ -9,5 +9,6 @@ COPY . .
 
 # EVE_PATH đã set mặc định trong config.py là /shared/logs/suricata/eve.json
 ENV EVE_PATH=/shared/logs/suricata/eve.json
+ENV CUDA_VISIBLE_DEVICES=-1
 
 CMD ["python", "main.py"]

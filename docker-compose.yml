@@ -1,14 +1,13 @@
-version: "3.8"
-
 services:
   suricata:
     build: ./suricata
-    network_mode: "host"                    # để thấy traffic host
-    volumes:
-      - ./shared/logs/suricata:/var/log/suricata
+    network_mode: "host"
     cap_add:
       - NET_ADMIN
       - NET_RAW
+      - SYS_NICE
+    volumes:
+      - ./shared/logs/suricata:/var/log/suricata
     restart: unless-stopped
 
   python-realtime:

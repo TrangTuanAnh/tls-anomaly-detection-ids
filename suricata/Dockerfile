@@ -1,7 +1,13 @@
+# suricata/Dockerfile
 FROM jasonish/suricata:latest
 
+# Copy config của bạn vào
 COPY suricata.yaml /etc/suricata/suricata.yaml
 
-RUN mkdir -p /var/log/suricata
+# Chạy ở chế độ PCAP, interface lấy từ config (pcap:any)
+# --pcap: dùng cấu hình pcap trong suricata.yaml
+ENV SURICATA_OPTIONS="--pcap"
 
-CMD ["suricata", "-c", "/etc/suricata/suricata.yaml"]
+# Không cần CMD ở đây, dùng ENTRYPOINT gốc
+# ENTRYPOINT gốc sẽ gọi:
+#   /usr/sbin/suricata -c /etc/suricata/suricata.yaml $SURICATA_OPTIONS "$@"

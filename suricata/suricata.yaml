@@ -14,7 +14,7 @@ outputs:
   - eve-log:
       enabled: yes
       filetype: regular
-      filename: eve.json # => /var/log/suricata/eve.json
+      filename: eve.json
       buffer-size: 0
       threaded: no
       metadata: yes
@@ -23,9 +23,7 @@ outputs:
             enabled: yes
             extended: yes
             custom: [sni, version, ja3, ja3s]
-        - stats:
-            totals: yes
-            threads: no
+            # nếu muốn gọn nữa thì bỏ bớt custom cũng được
 
 logging:
   default-log-level: info
@@ -36,18 +34,19 @@ logging:
         enabled: yes
         filename: suricata.log # => /var/log/suricata/suricata.log
 
+# 5. CAPTURE
 pcap:
   - interface: any
     checksum-checks: auto
 
-af-packet: [] # tắt cho đỡ rối
+af-packet: []
 
 app-layer:
   protocols:
     tls:
       enabled: yes
       detection-ports:
-        dp: 443
+        dp: 1:65535 # quét TLS trên mọi dest port (lab thì chơi được)
       ja3-fingerprints: yes
       ja4-fingerprints: yes
 
