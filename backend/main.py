@@ -21,9 +21,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from pydantic import BaseModel
 
-# ==========================================================
+
 #  Cấu hình DB từ biến môi trường (docker-compose sẽ set)
-# ==========================================================
 DATABASE_USER = os.getenv("DB_USER", "tls_user")
 DATABASE_PASSWORD = os.getenv("DB_PASSWORD", "tls_pass")
 DATABASE_HOST = os.getenv("DB_HOST", "db")
@@ -39,10 +38,8 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# ==========================================================
-#  SQLAlchemy models (match schema.sql)
-# ==========================================================
 
+#  SQLAlchemy models (match schema.sql)
 
 class TLSEvent(Base):
     __tablename__ = "tls_events"
@@ -173,10 +170,8 @@ class User(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
-# ==========================================================
-#  Pydantic schemas (request / response)
-# ==========================================================
 
+#  Pydantic schemas (request / response)
 
 class TLSEventIn(BaseModel):
     # thời gian & network
@@ -273,17 +268,12 @@ class FirewallActionOut(BaseModel):
     class Config:
         orm_mode = True
 
-
-# ==========================================================
 #  Config auto-block
-# ==========================================================
 AUTO_BLOCK_ENABLED = os.getenv("AUTO_BLOCK_ENABLED", "false").lower() == "true"
 FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "iptables")
 
 
-# ==========================================================
 #  Helpers
-# ==========================================================
 def get_db():
     db = SessionLocal()
     try:
@@ -329,9 +319,7 @@ def compute_severity(payload: TLSEventIn, is_anomaly: bool) -> Optional[str]:
     return "LOW"
 
 
-# ==========================================================
 #  FastAPI app & routes
-# ==========================================================
 app = FastAPI(title="TLS IDS Backend")
 
 

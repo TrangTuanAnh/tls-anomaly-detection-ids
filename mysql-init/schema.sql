@@ -2,7 +2,6 @@
 --  TLS Anomaly Detection - MySQL schema
 --  (minimal version: tls_events, alerts,
 --   firewall_actions, users)
--- ==========================================
 
 CREATE DATABASE IF NOT EXISTS tls_ids
   CHARACTER SET utf8mb4
@@ -10,10 +9,8 @@ CREATE DATABASE IF NOT EXISTS tls_ids
 
 USE tls_ids;
 
--- ==========================================
 --  1. Bảng tls_events
 --    - Lưu log TLS + kết quả ML
--- ==========================================
 CREATE TABLE tls_events (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
@@ -39,10 +36,7 @@ CREATE TABLE tls_events (
     cipher_suites   TEXT NULL,
     tls_groups      TEXT NULL,
 
-    -- ===========
     --  Feature từ feature_extractor.py
-    -- ===========
-
     -- TLS version features
     tls_version_enum        TINYINT      NULL,            -- 1,2,3,4...
     is_legacy_version       TINYINT(1)   NULL,            -- 1 nếu < TLS1.2 hoặc SSL
@@ -67,10 +61,8 @@ CREATE TABLE tls_events (
     rule_no_pfs             TINYINT(1)   NULL,            -- RULE_NO_PFS
     rule_cbc_only           TINYINT(1)   NULL,            -- RULE_CBC_ONLY
 
-    -- ===========
-    --  Kết quả model realtime (main.py)
-    -- ===========
 
+    --  Kết quả model realtime (main.py)
     ae_error        DOUBLE       NULL,
     ae_anom         TINYINT(1)   NULL,                    -- 1 nếu ae_error > AE_THRESHOLD
     iso_score       DOUBLE       NULL,
@@ -101,10 +93,8 @@ CREATE TABLE tls_events (
   COLLATE=utf8mb4_unicode_ci;
 
 
--- ==========================================
 --  2. Bảng alerts
 --    - Cảnh báo sinh ra từ tls_events
--- ==========================================
 CREATE TABLE alerts (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
@@ -140,10 +130,9 @@ CREATE TABLE alerts (
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
--- ==========================================
+
 --  3. Bảng firewall_actions
 --    - Lưu yêu cầu BLOCK/UNBLOCK IP
--- ==========================================
 CREATE TABLE firewall_actions (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 
@@ -178,10 +167,9 @@ CREATE TABLE firewall_actions (
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;
 
--- ==========================================
+
 --  4. Bảng users (tuỳ chọn nhưng nên có)
 --    - Dùng cho Web UI / phân quyền xử lý alert
--- ==========================================
 CREATE TABLE users (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     username        VARCHAR(191) NOT NULL UNIQUE,
