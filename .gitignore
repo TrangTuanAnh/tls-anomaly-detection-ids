@@ -25,3 +25,7 @@ model-training/dataset/*
 .DS_Store
 Thumbs.db
 .ipynb_checkpoints/
+
+# MySQL data directory (docker volume) - KHÔNG commit
+mysql-data/
+

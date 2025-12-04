@@ -2,11 +2,62 @@
 import os
 import numpy as np
 import joblib
+import requests
 from tensorflow.keras.models import load_model
 
 from config import EVE_PATH, AE_THRESHOLD, ISO_THRESHOLD
 from log_utils import follow_file, parse_tls_event
 from feature_extractor import build_feature_vector_from_event
+
+# URL Backend: chỉnh bằng biến môi trường BACKEND_URL
+# - Trong Docker: thường là "http://backend:8000"
+# - Khi chạy local: "http://localhost:8000"
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
+
+# Tên feature tương ứng với vector trả về từ build_feature_vector_from_event(...)
+FEATURE_NAMES = [
+    "tls_version_enum",       # 0
+    "is_legacy_version",      # 1
+    "rule_deprecated_version",# 2  (RULE_DEPRECATED_VERSION)
+    "num_ciphers",            # 3
+    "num_strong_ciphers",     # 4
+    "num_weak_ciphers",       # 5
+    "weak_cipher_ratio",      # 6
+    "supports_pfs",           # 7
+    "prefers_pfs",            # 8
+    "pfs_cipher_ratio",       # 9
+    "num_groups",             # 10
+    "uses_modern_group",      # 11
+    "legacy_group_ratio",     # 12
+    "rule_weak_cipher",       # 13  (RULE_WEAK_CIPHER)
+    "rule_no_pfs",            # 14  (RULE_NO_PFS)
+    "rule_cbc_only",          # 15  (RULE_CBC_ONLY)
+]
+
+INT_FEATURES = {
+    "tls_version_enum",
+    "num_ciphers",
+    "num_strong_ciphers",
+    "num_weak_ciphers",
+    "num_groups",
+}
+
+BOOL_FEATURES = {
+    "is_legacy_version",
+    "rule_deprecated_version",
+    "supports_pfs",
+    "prefers_pfs",
+    "uses_modern_group",
+    "rule_weak_cipher",
+    "rule_no_pfs",
+    "rule_cbc_only",
+}
+
+FLOAT_FEATURES = {
+    "weak_cipher_ratio",
+    "pfs_cipher_ratio",
+    "legacy_group_ratio",
+}
 
 
 def load_models():
@@ -68,10 +119,108 @@ def predict_anomaly(features, scaler, ae_model, iso_model=None):
     return result
 
 
+def build_feature_dict(features):
+    """
+    Map list feature (16 phần tử) -> dict tên:giá_trị,
+    và convert sang đúng kiểu (int / bool / float) để backend & DB dùng.
+    """
+    if not isinstance(features, (list, tuple)):
+        return {}
+
+    # Nếu thiếu thì pad None
+    if len(features) < len(FEATURE_NAMES):
+        features = list(features) + [None] * (len(FEATURE_NAMES) - len(features))
+
+    raw_dict = dict(zip(FEATURE_NAMES, features))
+    out = {}
+
+    for name, val in raw_dict.items():
+        if val is None:
+            out[name] = None
+            continue
+
+        if name in INT_FEATURES:
+            out[name] = int(val)
+        elif name in BOOL_FEATURES:
+            # 0.0 -> False, 1.0 -> True
+            out[name] = bool(round(float(val)))
+        elif name in FLOAT_FEATURES:
+            out[name] = float(val)
+        else:
+            # fallback: cứ để float
+            out[name] = float(val)
+
+    return out
+
+
+def build_backend_payload(evt, features, result):
+    """
+    Đóng gói event TLS + kết quả model thành JSON gửi lên Backend.
+    """
+    tls = evt.get("tls") or {}
+    ja3_obj = tls.get("ja3") or {}
+    ja3s_obj = tls.get("ja3s") or {}
+
+    feature_dict = build_feature_dict(features)
+
+    payload = {
+        # Thông tin chung của flow
+        "event_time": evt.get("timestamp"),
+        "sensor_name": evt.get("host"),     # nếu Suricata có field host
+        "flow_id": evt.get("flow_id"),
+        "src_ip": evt.get("src_ip"),
+        "src_port": evt.get("src_port"),
+        "dst_ip": evt.get("dest_ip"),
+        "dst_port": evt.get("dest_port"),
+        "proto": evt.get("proto"),
+
+        # TLS / JA3 metadata
+        "tls_version": tls.get("version"),
+        "ja3_hash": ja3_obj.get("hash"),
+        "ja3_string": ja3_obj.get("string"),
+        "ja3s_string": ja3s_obj.get("string"),
+        "sni": tls.get("sni"),
+
+        # Kết quả model
+        "ae_error": result.get("ae_error"),
+        "ae_anom": bool(result.get("ae_anom", 0)),
+        "iso_score": result.get("iso_score"),
+        "iso_anom": bool(result.get("iso_anom", 0)) if "iso_anom" in result else None,
+        "is_anomaly": bool(result.get("anomaly", 0)),
+
+        # Toàn bộ feature để debug / lưu JSON
+        "features_json": feature_dict,
+    }
+
+    # Đẩy luôn các feature chính ra top-level cho DB truy vấn dễ
+    payload.update(feature_dict)
+
+    return payload
+
+
+def send_event_to_backend(payload):
+    """
+    Gửi POST /api/events lên Backend.
+    Nếu lỗi thì chỉ log warning, không phá service.
+    """
+    if not BACKEND_URL:
+        return
+
+    url = BACKEND_URL.rstrip("/") + "/api/events"
+
+    try:
+        resp = requests.post(url, json=payload, timeout=1.0)
+        if not resp.ok:
+            print(f"[RT][WARN] Backend trả HTTP {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"[RT][WARN] Không gửi được event lên backend: {e}")
+
+
 def main():
     # Log khởi động ngắn gọn
     print("[RT] TLS anomaly detection service starting...")
     print(f"[RT] EVE_PATH = {EVE_PATH}")
+    print(f"[RT] BACKEND_URL = {BACKEND_URL}")
 
     try:
         scaler, ae_model, iso_model = load_models()
@@ -101,7 +250,7 @@ def main():
 
         result = predict_anomaly(features, scaler, ae_model, iso_model)
 
-        # Chỉ in log khi BẤT THƯỜNG
+        # Chỉ xử lý/bắn lên backend khi BẤT THƯỜNG
         if result.get("anomaly", 0) != 1:
             continue
 
@@ -124,6 +273,10 @@ def main():
             msg += f", iso_score={iso_score:.6f}"
 
         print(msg)
+
+        # >>> Gửi lên Backend <<<
+        payload = build_backend_payload(evt, features, result)
+        send_event_to_backend(payload)
 
 
 if __name__ == "__main__":
