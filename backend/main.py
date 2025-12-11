@@ -2,6 +2,9 @@ from fastapi import FastAPI, Depends, Query
 from typing import Optional, List
 from datetime import datetime
 import os
+import time
+from sqlalchemy.exc import OperationalError
+
 
 from sqlalchemy import (
     create_engine,
@@ -325,8 +328,21 @@ app = FastAPI(title="TLS IDS Backend")
 
 @app.on_event("startup")
 def on_startup():
-    # Nếu bảng đã tạo bằng schema.sql rồi thì create_all(checkfirst) sẽ không phá gì
-    Base.metadata.create_all(bind=engine)
+    # chờ DB sẵn sàng, retry nhiều lần
+    max_tries = 10
+    delay = 3  # giây
+
+    for i in range(max_tries):
+        try:
+            print(f"[startup] Try {i+1}/{max_tries} connect DB...")
+            Base.metadata.create_all(bind=engine)
+            print("[startup] DB ok, tables ready.")
+            break
+        except OperationalError as e:
+            print(f"[startup] DB not ready: {e}")
+            time.sleep(delay)
+    else:
+        raise RuntimeError("Database not reachable after many retries")
 
 
 @app.get("/health")

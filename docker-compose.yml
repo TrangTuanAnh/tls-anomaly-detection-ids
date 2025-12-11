@@ -9,27 +9,33 @@ services:
       MYSQL_PASSWORD: tls_pass
     volumes:
       - ./mysql-data:/var/lib/mysql
-      - ./mysql-init:/docker-entrypoint-initdb.d # chỗ chứa schema.sql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
   backend:
     build: ./backend
     container_name: tls-backend
     depends_on:
-      - db
+      db:
+        condition: service_healthy   # chỉ start khi db HEALTHY
     environment:
       DB_HOST: db
       DB_PORT: 3306
       DB_NAME: tls_ids
       DB_USER: tls_user
       DB_PASSWORD: tls_pass
-
-      # cấu hình backend
-      AUTO_BLOCK_ENABLED: "true" # hoặc "false" nếu chưa muốn auto-block
+      AUTO_BLOCK_ENABLED: "true"
       FIREWALL_TARGET: "iptables"
     ports:
       - "8000:8000"
     restart: unless-stopped
+
 
   suricata:
     build: ./suricata
@@ -48,10 +54,11 @@ services:
       - suricata
       - backend
     environment:
-      # trỏ tới backend trong docker network (không phải localhost)
       BACKEND_URL: http://backend:8000
-      # nếu muốn override EVE_PATH trong config.py thì set luôn:
       EVE_PATH: /shared/logs/suricata/eve.json
     volumes:
       - ./shared/logs/suricata:/shared/logs/suricata
     restart: unless-stopped
+
+volumes:
+  mysql_data:
