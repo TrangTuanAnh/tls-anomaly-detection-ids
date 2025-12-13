@@ -23,7 +23,7 @@ services:
     container_name: tls-backend
     depends_on:
       db:
-        condition: service_healthy   # chỉ start khi db HEALTHY
+        condition: service_healthy   
     environment:
       DB_HOST: db
       DB_PORT: 3306
