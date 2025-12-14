@@ -17,6 +17,9 @@ services:
       retries: 10
       start_period: 20s
     restart: unless-stopped
+    ports:
+      - "3306:3306"
+
 
   backend:
     build: ./backend
@@ -63,15 +66,13 @@ services:
   firewall-controller:
     build: ./firewall-controller
     environment:
+      DB_HOST: "127.0.0.1"
+      DB_PORT: "3306"
       DB_USER: tls_user
       DB_PASSWORD: tls_pass
-      DB_HOST: db
-      DB_PORT: "3306"
       DB_NAME: tls_ids
-      FIREWALL_TARGET: iptables
-      IPTABLES_CHAIN: INPUT
-      FW_POLL_INTERVAL: "1.0"
-      # FW_DRY_RUN: "true"   # bật nếu muốn test không chặn thật
+      IPTABLES_CHAIN: "DOCKER-USER"
+
     cap_add:
       - NET_ADMIN
     network_mode: "host"
