@@ -1,0 +1,16 @@
+services:
+  firewall-controller:
+    build: ./firewall-controller
+    container_name: fw-controller
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      DB_HOST: "SENSOR_IP_HERE"
+      DB_PORT: "3306"
+      DB_USER: tls_user
+      DB_PASSWORD: tls_pass
+      DB_NAME: tls_ids
+      IPTABLES_CHAIN: "FORWARD"
+      FW_DRY_RUN: "false"
+    restart: unless-stopped
