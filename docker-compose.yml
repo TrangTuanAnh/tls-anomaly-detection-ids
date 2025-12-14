@@ -60,5 +60,29 @@ services:
       - ./shared/logs/suricata:/shared/logs/suricata
     restart: unless-stopped
 
+  firewall-controller:
+    build: ./firewall-controller
+    environment:
+      DB_USER: tls_user
+      DB_PASSWORD: tls_pass
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: tls_ids
+      FIREWALL_TARGET: iptables
+      IPTABLES_CHAIN: INPUT
+      FW_POLL_INTERVAL: "1.0"
+      # FW_DRY_RUN: "true"   # bật nếu muốn test không chặn thật
+    cap_add:
+      - NET_ADMIN
+    network_mode: "host"
+    depends_on:
+      - db
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
 volumes:
   mysql_data:

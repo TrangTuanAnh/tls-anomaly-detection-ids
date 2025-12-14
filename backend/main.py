@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 import time
 from sqlalchemy.exc import OperationalError
+from fastapi import HTTPException
 
 
 from sqlalchemy import (
@@ -472,3 +473,29 @@ def list_firewall_actions(
         q = q.filter(FirewallAction.status == status)
     actions = q.limit(limit).all()
     return actions
+
+class FirewallActionIn(BaseModel):
+    src_ip: str
+    action_type: str   # "BLOCK" hoặc "UNBLOCK"
+    target: Optional[str] = None
+    description: Optional[str] = None
+
+
+@app.post("/api/firewall-actions", response_model=FirewallActionOut)
+def create_firewall_action(payload: FirewallActionIn, db=Depends(get_db)):
+    act = payload.action_type.upper().strip()
+    if act not in ("BLOCK", "UNBLOCK"):
+        raise HTTPException(status_code=400, detail="action_type must be BLOCK or UNBLOCK")
+
+    fw = FirewallAction(
+        alert_id=None,
+        src_ip=payload.src_ip,
+        action_type=act,
+        target=payload.target or FIREWALL_TARGET,
+        description=payload.description or f"Manual {act} from UI",
+        status="PENDING",
+    )
+    db.add(fw)
+    db.commit()
+    db.refresh(fw)
+    return fw
