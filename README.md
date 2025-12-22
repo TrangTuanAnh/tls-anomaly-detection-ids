@@ -21,7 +21,7 @@ Hệ thống gồm **Sensor -> Backend/DB -> Firewall-controller** để phát h
 2) python-real-time-service đọc log, nếu bất thường → `POST /api/events` lên backend.
 3) Backend ghi `tls_events`, tạo `alerts` (nếu cần).
 4) Nếu bật auto-block hoặc người dùng chặn tay: backend thêm record vào `firewall_actions` (status `PENDING`).
-5) firewall-controller đọc `PENDING` → chạy iptables (DROP) → cập nhật status sang `EXECUTED` hoặc `FAILED`.
+5) firewall-controller đọc `PENDING` -> chạy iptables (DROP) -> cập nhật status sang `EXECUTED` hoặc `FAILED`.
 
 ---
 
