@@ -2,16 +2,18 @@ services:
   db:
     image: mysql:8.0
     container_name: tls-mysql
+    env_file:
+      - .env
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: tls_ids
-      MYSQL_USER: tls_user
-      MYSQL_PASSWORD: tls_pass
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-tls_ids}
+      MYSQL_USER: ${MYSQL_USER:-tls_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - ./mysql-data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -27,12 +29,14 @@ services:
     depends_on:
       db:
         condition: service_healthy   
+    env_file:
+      - .env
     environment:
       DB_HOST: db
       DB_PORT: 3306
-      DB_NAME: tls_ids
-      DB_USER: tls_user
-      DB_PASSWORD: tls_pass
+      DB_NAME: ${MYSQL_DATABASE:-tls_ids}
+      DB_USER: ${MYSQL_USER:-tls_user}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
       AUTO_BLOCK_ENABLED: "true"
       FIREWALL_TARGET: "iptables"
     ports:
@@ -56,6 +60,8 @@ services:
     depends_on:
       - suricata
       - backend
+    env_file:
+      - .env
     environment:
       BACKEND_URL: http://backend:8000
       EVE_PATH: /shared/logs/suricata/eve.json
@@ -65,12 +71,14 @@ services:
 
   firewall-controller:
     build: ./firewall-controller
+    env_file:
+      - .env
     environment:
       DB_HOST: "127.0.0.1"
       DB_PORT: "3306"
-      DB_USER: tls_user
-      DB_PASSWORD: tls_pass
-      DB_NAME: tls_ids
+      DB_USER: ${MYSQL_USER:-tls_user}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-tls_ids}
       IPTABLES_CHAIN: "DOCKER-USER"
 
     cap_add:

@@ -1,13 +1,19 @@
 export async function apiGet(path) {
-  const res = await fetch(path, { headers: { "Accept": "application/json" } });
+  const token = localStorage.getItem("jwt") || "";
+  const headers = { "Accept": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(path, { headers });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
   return await res.json();
 }
 
 export async function apiPost(path, body) {
+  const token = localStorage.getItem("jwt") || "";
+  const headers = { "Content-Type": "application/json", "Accept": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   if (!res.ok) {

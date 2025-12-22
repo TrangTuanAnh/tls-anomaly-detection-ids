@@ -148,6 +148,13 @@ CREATE TABLE firewall_actions (
     executed_at     DATETIME(6) NULL,
     expires_at      DATETIME(6) NULL,
 
+    -- Integrity (backend -> firewall-controller)
+    -- Dùng để firewall-controller xác thực hành động đến từ backend hợp lệ,
+    -- tránh DB bị sửa/tạo record giả.
+    hmac_ts         BIGINT NULL,
+    hmac_nonce      VARCHAR(64) NULL,
+    hmac_sig        CHAR(64) NULL,
+
     status          ENUM('PENDING', 'EXECUTED', 'FAILED', 'CANCELLED')
                         NOT NULL DEFAULT 'PENDING',
     error_message   TEXT NULL,
@@ -159,10 +166,46 @@ CREATE TABLE firewall_actions (
     INDEX idx_fw_actions_src_ip (src_ip),
     INDEX idx_fw_actions_alert_id (alert_id),
 
+    -- chống replay / record giả mạo (nếu đã có nonce thì không cho trùng)
+    UNIQUE KEY uniq_fw_hmac_nonce (hmac_nonce),
+
     CONSTRAINT fk_fw_actions_alert
         FOREIGN KEY (alert_id)
         REFERENCES alerts(id)
         ON DELETE SET NULL
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
+
+--  5. Bảng request_nonces
+--    - Lưu nonce đã dùng để chống replay (HMAC + nonce + timestamp)
+CREATE TABLE request_nonces (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    scope           VARCHAR(64) NOT NULL,
+    nonce           VARCHAR(64) NOT NULL,
+    created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    expires_at      DATETIME(6) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uniq_scope_nonce (scope, nonce),
+    INDEX idx_nonces_expires (expires_at)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
+
+--  6. Bảng audit_logs
+--    - Nhật ký thao tác admin (đặc biệt là block/unblock)
+CREATE TABLE audit_logs (
+    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    actor           VARCHAR(191) NOT NULL,
+    action          VARCHAR(64) NOT NULL,
+    detail          TEXT NULL,
+    src_ip          VARCHAR(64) NULL,
+    PRIMARY KEY (id),
+    INDEX idx_audit_created_at (created_at),
+    INDEX idx_audit_actor (actor)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;

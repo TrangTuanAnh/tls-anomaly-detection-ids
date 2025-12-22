@@ -63,6 +63,14 @@ Hệ thống gồm **Sensor → Backend/DB → Firewall-controller** để phát
 
 ### 3.2 Start
 
+Tạo file cấu hình môi trường (không commit):
+
+```bash
+cp .env.example .env
+# sửa các biến quan trọng: MYSQL_ROOT_PASSWORD, MYSQL_PASSWORD, JWT_SECRET_KEY,
+# FW_ACTION_HMAC_SECRET, ADMIN_PASSWORD, ...
+```
+
 ```bash
 docker compose up -d --build
 ```
@@ -95,9 +103,21 @@ docker exec -it test-client curl -I https://example.com
 
 ### 4.2 Tạo lệnh BLOCK qua backend
 
+Lấy JWT token:
+
+```bash
+TOKEN=$(curl -sS -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"Admin@12345"}' | \
+  python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+```
+
+Gọi API tạo firewall action (yêu cầu role=admin):
+
 ```bash
 curl -X POST http://localhost:8000/api/firewall-actions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"src_ip":"172.28.0.10","action_type":"BLOCK"}'
 ```
 
@@ -206,3 +226,16 @@ sudo -E python3 main.py
 
 - Không expose MySQL 3306 ra internet. Chỉ mở trong LAN và giới hạn IP firewall được phép truy cập.
 - Auto-block nên bật trong môi trường lab/demo hoặc khi bạn chấp nhận rủi ro false positive.
+
+Khuyến nghị bật các tuỳ chọn tăng cường:
+
+- **Ký HMAC firewall_actions**: đặt `FW_ACTION_HMAC_SECRET` (backend sẽ ký, firewall-controller sẽ verify).
+- **Chống replay cho admin request** (tuỳ chọn): `REQUIRE_ADMIN_HMAC=true` + `ADMIN_HMAC_SECRET`.
+- **Chống replay/giả mạo đường ingest** (tuỳ chọn): `REQUIRE_INGEST_HMAC=true` + `INGEST_HMAC_SECRET`.
+- **Integrity model** (tuỳ chọn): set `AE_MODEL_SHA256` / `SCALER_SHA256`.
+
+**Bổ sung theo checklist**
+
+- UI/API quản trị dùng JWT + phân quyền (admin mới tạo được BLOCK/UNBLOCK).
+- `firewall_actions` được ký HMAC (backend -> firewall-controller) để phát hiện record giả mạo.
+- (Tuỳ chọn) HMAC + nonce + timestamp cho đường ingest (python-realtime -> backend) và đường admin (UI -> backend).

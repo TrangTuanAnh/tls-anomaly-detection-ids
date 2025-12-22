@@ -17,6 +17,32 @@ function SeverityBadge({ sev }) {
 }
 
 export default function App() {
+  const [token, setToken] = useState(localStorage.getItem("jwt") || "");
+  const [me, setMe] = useState(null);
+  const [loginUser, setLoginUser] = useState("admin");
+  const [loginPass, setLoginPass] = useState("Admin@12345");
+  const [loginMsg, setLoginMsg] = useState("");
+
+  async function doLogin(e) {
+    e.preventDefault();
+    setLoginMsg("");
+    try {
+      const r = await apiPost("/api/auth/login", { username: loginUser, password: loginPass });
+      const t = r.access_token || "";
+      if (!t) throw new Error("No token returned");
+      localStorage.setItem("jwt", t);
+      setToken(t);
+    } catch (err) {
+      setLoginMsg(String(err.message || err));
+    }
+  }
+
+  function logout() {
+    localStorage.removeItem("jwt");
+    setToken("");
+    setMe(null);
+  }
+
   const [tab, setTab] = useState("dashboard");
 
   // data
@@ -56,7 +82,24 @@ export default function App() {
     } catch {}
   }
 
-  useEffect(() => { refresh(); }, [onlyAnom, alertStatus, alertSeverity, actionStatus]);
+  useEffect(() => {
+    // Fetch current user if logged in
+    (async () => {
+      if (!token) return;
+      try {
+        const u = await apiGet("/api/auth/me");
+        setMe(u);
+      } catch {
+        // invalid token
+        logout();
+      }
+    })();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    refresh();
+  }, [token, onlyAnom, alertStatus, alertSeverity, actionStatus]);
 
   const kpis = useMemo(() => {
     const totalEvents = events.length;
@@ -106,6 +149,34 @@ export default function App() {
     { key: "error_message", title: "Error", render: r => (r.error_message ? String(r.error_message).slice(0, 80) : "") },
   ];
 
+  if (!token) {
+    return (
+      <div className="container">
+        <div className="card" style={{maxWidth: 520, margin: "40px auto"}}>
+          <div className="header">
+            <div>
+              <div className="h-title">TLS IDS Admin</div>
+              <div className="muted">Login để truy cập dashboard (JWT)</div>
+            </div>
+          </div>
+          <form style={{padding: 16}} onSubmit={doLogin}>
+            <div className="muted" style={{marginBottom: 6}}>Username</div>
+            <input value={loginUser} onChange={e => setLoginUser(e.target.value)} required />
+            <div className="muted" style={{margin: "12px 0 6px"}}>Password</div>
+            <input type="password" value={loginPass} onChange={e => setLoginPass(e.target.value)} required />
+            <div className="row" style={{marginTop: 12}}>
+              <button className="btn primary" type="submit">Login</button>
+              <span className="muted">{loginMsg}</span>
+            </div>
+            <div className="muted" style={{marginTop: 12}}>
+              Default: admin / Admin@12345 (đổi trong .env khi deploy)
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="container">
       <div className="card">
@@ -115,11 +186,13 @@ export default function App() {
             <div className="muted">Frontend-only UI (calls Backend API via /api/*)</div>
           </div>
           <div className="row">
+            <span className="badge">User: {me ? `${me.username} (${me.role})` : "..."}</span>
             <span className="badge">Events: {kpis.totalEvents}</span>
             <span className="badge">Alerts: {kpis.totalAlerts}</span>
             <span className="badge">Blocked: {kpis.blocked}</span>
             <span className="badge">Pending: {kpis.pending}</span>
             <button className="btn" onClick={refresh}>Refresh</button>
+            <button className="btn" onClick={logout}>Logout</button>
           </div>
         </div>
 

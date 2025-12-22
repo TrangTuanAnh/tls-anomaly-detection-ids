@@ -3,6 +3,11 @@ import os
 import numpy as np
 import joblib
 import requests
+import hmac
+import hashlib
+import json
+import secrets
+import time
 from tensorflow.keras.models import load_model
 
 from config import EVE_PATH, AE_THRESHOLD, ISO_THRESHOLD
@@ -13,6 +18,14 @@ from feature_extractor import build_feature_vector_from_event
 # - Trong Docker: thường là "http://backend:8000"
 # - Khi chạy local: "http://localhost:8000"
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
+
+# (Optional) HMAC signing for ingest -> backend
+INGEST_HMAC_SECRET = os.getenv("INGEST_HMAC_SECRET", "")
+INGEST_REQUIRE = os.getenv("REQUIRE_INGEST_HMAC", "false").lower() == "true"
+
+# (Optional) Model integrity checks
+AE_MODEL_SHA256 = os.getenv("AE_MODEL_SHA256", "")
+SCALER_SHA256 = os.getenv("SCALER_SHA256", "")
 
 # Tên feature tương ứng với vector trả về từ build_feature_vector_from_event(...)
 FEATURE_NAMES = [
@@ -67,14 +80,38 @@ def load_models():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(base_dir, "trained_models")
 
-    scaler_path = os.path.join(models_dir, "scaler_tls.pkl")
+    # Backward-compatible: project.zip hiện có scaler.pkl
+    scaler_path_candidates = [
+        os.getenv("SCALER_PATH", ""),
+        os.path.join(models_dir, "scaler_tls.pkl"),
+        os.path.join(models_dir, "scaler.pkl"),
+    ]
+    scaler_path = next((p for p in scaler_path_candidates if p and os.path.isfile(p)), "")
     ae_path = os.path.join(models_dir, "autoencoder_tls.h5")
     iso_path = os.path.join(models_dir, "isolation_forest_tls.pkl")
 
-    if not os.path.isfile(scaler_path):
-        raise FileNotFoundError(f"Không tìm thấy scaler: {scaler_path}")
+    if not scaler_path:
+        raise FileNotFoundError("Không tìm thấy scaler (SCALER_PATH/scaler_tls.pkl/scaler.pkl)")
     if not os.path.isfile(ae_path):
         raise FileNotFoundError(f"Không tìm thấy autoencoder: {ae_path}")
+
+    # ---- Integrity checks (sha256) ----
+    def sha256_file(path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    if AE_MODEL_SHA256:
+        actual = sha256_file(ae_path)
+        if actual.lower() != AE_MODEL_SHA256.strip().lower():
+            raise RuntimeError(f"AE model sha256 mismatch: expected {AE_MODEL_SHA256}, got {actual}")
+
+    if SCALER_SHA256:
+        actual = sha256_file(scaler_path)
+        if actual.lower() != SCALER_SHA256.strip().lower():
+            raise RuntimeError(f"Scaler sha256 mismatch: expected {SCALER_SHA256}, got {actual}")
 
     scaler = joblib.load(scaler_path)
     # compile=False để tránh lỗi deserialize metrics cũ
@@ -208,8 +245,27 @@ def send_event_to_backend(payload):
 
     url = BACKEND_URL.rstrip("/") + "/api/events"
 
+    headers = {}
+
+    # Optional: sign request (HMAC + nonce + timestamp) to harden ingest path
+    if INGEST_HMAC_SECRET:
+        ts = str(int(time.time()))
+        nonce = secrets.token_hex(16)
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        mac = hmac.new(INGEST_HMAC_SECRET.encode("utf-8"), digestmod=hashlib.sha256)
+        mac.update(ts.encode("utf-8"))
+        mac.update(b".")
+        mac.update(nonce.encode("utf-8"))
+        mac.update(b".")
+        mac.update(body)
+        sig = mac.hexdigest()
+        headers.update({"X-Timestamp": ts, "X-Nonce": nonce, "X-Signature": sig})
+    elif INGEST_REQUIRE:
+        print("[RT][ERROR] REQUIRE_INGEST_HMAC=true but INGEST_HMAC_SECRET is empty")
+        return
+
     try:
-        resp = requests.post(url, json=payload, timeout=1.0)
+        resp = requests.post(url, json=payload, headers=headers, timeout=1.0)
         if not resp.ok:
             print(f"[RT][WARN] Backend trả HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:

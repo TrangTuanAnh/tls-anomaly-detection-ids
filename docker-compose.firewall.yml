@@ -5,12 +5,14 @@ services:
     network_mode: "host"
     cap_add:
       - NET_ADMIN
+    env_file:
+      - .env
     environment:
       DB_HOST: "SENSOR_IP_HERE"
       DB_PORT: "3306"
-      DB_USER: tls_user
-      DB_PASSWORD: tls_pass
-      DB_NAME: tls_ids
+      DB_USER: ${MYSQL_USER:-tls_user}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-tls_ids}
       IPTABLES_CHAIN: "FORWARD"
       FW_DRY_RUN: "false"
     restart: unless-stopped
