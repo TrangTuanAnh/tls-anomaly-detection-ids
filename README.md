@@ -1,6 +1,6 @@
 # Hệ thống phát hiện bất thường TLS/SSL (JA3) + Tự động chặn IP
 
-Hệ thống gồm **Sensor → Backend/DB → Firewall-controller** để phát hiện TLS bất thường (dựa trên JA3/feature từ log Suricata) và chặn IP bằng firewall.
+Hệ thống gồm **Sensor -> Backend/DB -> Firewall-controller** để phát hiện TLS bất thường (dựa trên JA3/feature từ log Suricata) và chặn IP bằng firewall.
 
 ---
 
