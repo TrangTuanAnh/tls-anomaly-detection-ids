@@ -1,7 +1,7 @@
 """TLS IDS Backend (FastAPI)
 
 Bổ sung các phần còn thiếu theo checklist:
-- JWT auth + bcrypt (passlib) + RBAC
+- Session token (HMAC-signed) + bcrypt (passlib) + RBAC
 - Seed admin mặc định
 - Bảo vệ endpoint nhạy cảm (tạo firewall action)
 - HMAC + nonce + timestamp (tùy chọn) cho request admin và/hoặc ingest
@@ -13,6 +13,7 @@ Nếu bạn đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate 
 
 from __future__ import annotations
 
+import base64
 import hmac
 import hashlib
 import json
@@ -24,8 +25,6 @@ from typing import Optional, List
 
 from fastapi import FastAPI, Depends, Query, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
-
-from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from sqlalchemy.exc import OperationalError, IntegrityError
@@ -65,8 +64,9 @@ DATABASE_URL = (
     f"@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
 )
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_ME")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+# Login session token (HMAC-signed)
+SESSION_HMAC_SECRET = os.getenv("SESSION_HMAC_SECRET", "")
+SESSION_TOKEN_PREFIX = os.getenv("SESSION_TOKEN_PREFIX", "HMAC1")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
@@ -409,10 +409,72 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 def create_access_token(data: dict, expires_minutes: int) -> str:
-    to_encode = dict(data)
-    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    """Create a compact HMAC-signed session token.
+
+    Format: <prefix>.<payload_b64url>.<sig_hex>
+    Payload is canonical JSON and includes: sub, role, iat, exp.
+    """
+    if not SESSION_HMAC_SECRET:
+        raise RuntimeError("SESSION_HMAC_SECRET not configured")
+
+    now = int(time.time())
+    payload = dict(data)
+    payload.update({
+        "iat": now,
+        "exp": now + int(expires_minutes) * 60,
+    })
+
+    payload_b = canonical_json_bytes(payload)
+    payload_b64 = base64.urlsafe_b64encode(payload_b).rstrip(b"=").decode("ascii")
+
+    sig = hmac.new(
+        SESSION_HMAC_SECRET.encode("utf-8"),
+        payload_b64.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{SESSION_TOKEN_PREFIX}.{payload_b64}.{sig}"
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def decode_access_token(token: str) -> dict:
+    if not SESSION_HMAC_SECRET:
+        raise HTTPException(status_code=500, detail="SESSION_HMAC_SECRET not configured")
+
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    prefix, payload_b64, sig = parts
+    if prefix != SESSION_TOKEN_PREFIX:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    expected = hmac.new(
+        SESSION_HMAC_SECRET.encode("utf-8"),
+        payload_b64.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, sig.strip().lower()):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    exp = payload.get("exp")
+    if exp is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        exp_i = int(exp)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if int(time.time()) > exp_i:
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    return payload
 
 
 def canonical_json_bytes(obj: object) -> bytes:
@@ -541,11 +603,11 @@ def audit(db, actor: str, action: str, detail: str, src_ip: Optional[str]) -> No
 def get_current_user(db=Depends(get_db), token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = decode_access_token(token)
         username: str = payload.get("sub")
         if not username:
             raise credentials_exception
-    except JWTError:
+    except HTTPException:
         raise credentials_exception
 
     user = db.query(User).filter(User.username == username).first()

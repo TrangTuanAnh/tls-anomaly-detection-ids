@@ -67,7 +67,7 @@ Tạo file cấu hình môi trường (không commit):
 
 ```bash
 cp .env.example .env
-# sửa các biến quan trọng: MYSQL_ROOT_PASSWORD, MYSQL_PASSWORD, JWT_SECRET_KEY,
+# sửa các biến quan trọng: MYSQL_ROOT_PASSWORD, MYSQL_PASSWORD, SESSION_HMAC_SECRET,
 # FW_ACTION_HMAC_SECRET, ADMIN_PASSWORD, ...
 ```
 
@@ -103,7 +103,7 @@ docker exec -it test-client curl -I https://example.com
 
 ### 4.2 Tạo lệnh BLOCK qua backend
 
-Lấy JWT token:
+Lấy session token (HMAC-signed):
 
 ```bash
 TOKEN=$(curl -sS -X POST http://localhost:8000/api/auth/login \
@@ -236,6 +236,6 @@ Khuyến nghị bật các tuỳ chọn tăng cường:
 
 **Bổ sung theo checklist**
 
-- UI/API quản trị dùng JWT + phân quyền (admin mới tạo được BLOCK/UNBLOCK).
+- UI/API quản trị dùng session token (HMAC-signed) + phân quyền (admin mới tạo được BLOCK/UNBLOCK).
 - `firewall_actions` được ký HMAC (backend -> firewall-controller) để phát hiện record giả mạo.
 - (Tuỳ chọn) HMAC + nonce + timestamp cho đường ingest (python-realtime -> backend) và đường admin (UI -> backend).

@@ -1,5 +1,5 @@
 export async function apiGet(path) {
-  const token = localStorage.getItem("jwt") || "";
+  const token = localStorage.getItem("session") || "";
   const headers = { "Accept": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(path, { headers });
@@ -8,7 +8,7 @@ export async function apiGet(path) {
 }
 
 export async function apiPost(path, body) {
-  const token = localStorage.getItem("jwt") || "";
+  const token = localStorage.getItem("session") || "";
   const headers = { "Content-Type": "application/json", "Accept": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(path, {

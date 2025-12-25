@@ -17,7 +17,7 @@ function SeverityBadge({ sev }) {
 }
 
 export default function App() {
-  const [token, setToken] = useState(localStorage.getItem("jwt") || "");
+  const [token, setToken] = useState(localStorage.getItem("session") || "");
   const [me, setMe] = useState(null);
   const [loginUser, setLoginUser] = useState("admin");
   const [loginPass, setLoginPass] = useState("Admin@12345");
@@ -30,7 +30,7 @@ export default function App() {
       const r = await apiPost("/api/auth/login", { username: loginUser, password: loginPass });
       const t = r.access_token || "";
       if (!t) throw new Error("No token returned");
-      localStorage.setItem("jwt", t);
+      localStorage.setItem("session", t);
       setToken(t);
     } catch (err) {
       setLoginMsg(String(err.message || err));
@@ -38,7 +38,7 @@ export default function App() {
   }
 
   function logout() {
-    localStorage.removeItem("jwt");
+    localStorage.removeItem("session");
     setToken("");
     setMe(null);
   }
@@ -156,7 +156,7 @@ export default function App() {
           <div className="header">
             <div>
               <div className="h-title">TLS IDS Admin</div>
-              <div className="muted">Login để truy cập dashboard (JWT)</div>
+              <div className="muted">Login để truy cập dashboard (HMAC session token)</div>
             </div>
           </div>
           <form style={{padding: 16}} onSubmit={doLogin}>
