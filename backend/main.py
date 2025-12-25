@@ -19,7 +19,7 @@ from fastapi.security import OAuth2PasswordBearer
 
 from passlib.context import CryptContext
 
-from sqlalchemy.exc import OperationalError, IntegrityError
+from sqlalchemy.exc import OperationalError, IntegrityError, SQLAlchemyError
 from sqlalchemy import (
     create_engine,
     Column,
@@ -600,15 +600,20 @@ app = FastAPI(title="TLS IDS Backend")
 
 @app.on_event("startup")
 def on_startup():
-    max_tries = 10
-    delay = 3
+    # Khi chạy bằng Docker/Compose, MySQL có thể mất khá lâu ở lần init đầu tiên
+    # (tạo data dir + chạy mysql-init). Nếu backend fail quá sớm, Docker sẽ restart
+    # liên tục (nhìn như container "nháy nháy").
+    # Cho phép cấu hình số lần retry và delay bằng env để phù hợp môi trường.
+    max_tries = int(os.getenv("DB_CONNECT_MAX_TRIES", "60"))
+    delay = float(os.getenv("DB_CONNECT_DELAY_SEC", "2"))
     for i in range(max_tries):
         try:
             print(f"[startup] Try {i+1}/{max_tries} connect DB...")
             Base.metadata.create_all(bind=engine)
             print("[startup] DB ok, tables ready.")
             break
-        except OperationalError as e:
+        except (OperationalError, SQLAlchemyError) as e:
+            # MySQL chưa sẵn sàng / DB chưa được tạo / permission chưa có
             print(f"[startup] DB not ready: {e}")
             time.sleep(delay)
     else:

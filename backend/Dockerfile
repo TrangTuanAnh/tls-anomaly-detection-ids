@@ -1,6 +1,14 @@
 # Image Python nhẹ
 FROM python:3.11-slim
 
+# Một số package (uvicorn[standard], bcrypt...) có thể cần build tool khi không có wheel phù hợp
+# (đặc biệt trên arm64). Cài tối thiểu build deps để tránh "build nháy nháy"/fail.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential gcc \
+        libffi-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Không buffer log
 ENV PYTHONUNBUFFERED=1
 
