@@ -1,14 +1,6 @@
 """TLS IDS Backend (FastAPI)
-
-Bổ sung các phần còn thiếu theo checklist:
-- JWT auth + bcrypt (passlib) + RBAC
-- Seed admin mặc định
-- Bảo vệ endpoint nhạy cảm (tạo firewall action)
-- HMAC + nonce + timestamp (tùy chọn) cho request admin và/hoặc ingest
-- Audit log cơ bản
-
 Lưu ý: Project này dùng MySQL schema từ mysql-init/schema.sql.
-Nếu bạn đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate để có các cột mới.
+Nếu đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate để có các cột mới.
 """
 
 from __future__ import annotations
@@ -25,7 +17,6 @@ from typing import Optional, List
 from fastapi import FastAPI, Depends, Query, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 
-from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from sqlalchemy.exc import OperationalError, IntegrityError
@@ -47,7 +38,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
-from pydantic import BaseModel
+from pydantic import BaseModel, constr
 
 
 # =========================
@@ -65,8 +56,8 @@ DATABASE_URL = (
     f"@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
 )
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_ME")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+SESSION_HMAC_SECRET = os.getenv("SESSION_HMAC_SECRET", "CHANGE_ME")
+
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
@@ -381,8 +372,9 @@ class UserOut(BaseModel):
 
 
 class UserCreateIn(BaseModel):
-    username: str
-    password: str
+    # Chặn '|' và space để token không bị vỡ format, đồng thời gọn để demo/báo cáo
+    username: constr(strip_whitespace=True, min_length=3, max_length=50, regex=r"^[A-Za-z0-9_.-]+$")
+    password: constr(min_length=6, max_length=200)
     full_name: Optional[str] = None
     role: str = "viewer"
 
@@ -409,10 +401,24 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 def create_access_token(data: dict, expires_minutes: int) -> str:
-    to_encode = dict(data)
-    expire = datetime.utcnow() + timedelta(minutes=expires_minutes)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    # data dự kiến có: {"sub": username, "role": role}
+    if not SESSION_HMAC_SECRET or SESSION_HMAC_SECRET == "CHANGE_ME":
+        raise HTTPException(status_code=500, detail="SESSION_HMAC_SECRET not configured")
+
+    username = data.get("sub")
+    role = data.get("role", "viewer")
+    if not username:
+        raise HTTPException(status_code=500, detail="Missing subject")
+
+    exp = int(time.time()) + expires_minutes * 60
+    nonce = secrets.token_hex(12)
+    base = f"v1|{username}|{role}|{exp}|{nonce}"
+    sig = hmac.new(
+        SESSION_HMAC_SECRET.encode("utf-8"),
+        base.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{base}|{sig}"
 
 
 def canonical_json_bytes(obj: object) -> bytes:
@@ -539,20 +545,42 @@ def audit(db, actor: str, action: str, detail: str, src_ip: Optional[str]) -> No
 
 
 def get_current_user(db=Depends(get_db), token: str = Depends(oauth2_scheme)) -> User:
-    credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
+    if not SESSION_HMAC_SECRET or SESSION_HMAC_SECRET == "CHANGE_ME":
+        raise HTTPException(status_code=500, detail="SESSION_HMAC_SECRET not configured")
+
+    cred_exc = HTTPException(status_code=401, detail="Could not validate credentials")
+
+    token = (token or "").strip()
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        username: str = payload.get("sub")
-        if not username:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
+        parts = token.split("|")
+        # v1|username|role|exp|nonce|sig => 6 phần
+        if len(parts) != 6 or parts[0] != "v1":
+            raise cred_exc
+
+        _, username, role, exp_s, nonce, sig = parts
+        exp = int(exp_s)
+    except Exception:
+        raise cred_exc
+
+    if int(time.time()) > exp:
+        raise HTTPException(status_code=401, detail="Token expired")
+
+    base = f"v1|{username}|{role}|{exp}|{nonce}"
+    expected = hmac.new(
+        SESSION_HMAC_SECRET.encode("utf-8"),
+        base.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, sig.strip().lower()):
+        raise cred_exc
 
     user = db.query(User).filter(User.username == username).first()
     if not user:
-        raise credentials_exception
+        raise cred_exc
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Inactive user")
+
     return user
 
 
@@ -841,6 +869,20 @@ async def create_firewall_action(
             max_age_sec=ADMIN_HMAC_MAX_AGE_SEC,
             ttl_sec=ADMIN_HMAC_MAX_AGE_SEC,
         )
+    else:
+        # nếu client gửi HMAC mà sai -> vẫn reject (tránh downgrade)
+        if request.headers.get("X-Signature"):
+            verify_hmac_headers(
+                db=db,
+                scope="admin",
+                secret=ADMIN_HMAC_SECRET,
+                body_bytes=canonical_json_bytes(payload.dict()),
+                ts_header=request.headers.get("X-Timestamp"),
+                nonce_header=request.headers.get("X-Nonce"),
+                sig_header=request.headers.get("X-Signature"),
+                max_age_sec=ADMIN_HMAC_MAX_AGE_SEC,
+                ttl_sec=ADMIN_HMAC_MAX_AGE_SEC,
+            )
 
     # Sign the queued firewall action so firewall-controller can verify integrity
     ts, nonce, sig = sign_firewall_action(act, payload.src_ip)
