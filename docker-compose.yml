@@ -28,7 +28,7 @@ services:
     container_name: tls-backend
     depends_on:
       db:
-        condition: service_healthy   
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -39,9 +39,11 @@ services:
       DB_PASSWORD: ${MYSQL_PASSWORD}
       AUTO_BLOCK_ENABLED: "true"
       FIREWALL_TARGET: "iptables"
-    ports:
-      - "8000:8000"
-    restart: unless-stopped
+
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin@12345}
+      ADMIN_FULL_NAME: ${ADMIN_FULL_NAME:-Default Admin}
+
 
 
   suricata:
@@ -93,5 +95,3 @@ services:
     depends_on:
       - backend
 
-volumes:
-  mysql_data:
