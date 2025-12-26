@@ -225,7 +225,7 @@ sudo -E python3 main.py
 ## 8) Ghi chú an toàn
 
 - Không expose MySQL 3306 ra internet. Chỉ mở trong LAN và giới hạn IP firewall được phép truy cập.
-- Auto-block nên bật trong môi trường lab/demo hoặc khi bạn chấp nhận rủi ro false positive.
+- Auto-block nên bật trong môi trường lab/demo hoặc khi chấp nhận rủi ro false positive.
 
 Khuyến nghị bật các tuỳ chọn tăng cường:
 
