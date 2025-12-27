@@ -1,6 +1,5 @@
 # Hệ thống phát hiện bất thường TLS/SSL (JA3) + Tự động chặn IP
 
-Hệ thống gồm **Sensor -> Backend/DB -> Firewall-controller** để phát hiện TLS bất thường (dựa trên JA3/feature từ log Suricata) và chặn IP bằng firewall.
 
 ---
 
@@ -8,20 +7,22 @@ Hệ thống gồm **Sensor -> Backend/DB -> Firewall-controller** để phát h
 
 ### 1.1 Thành phần
 
-- **Suricata (Sensor)**: bắt TLS handshake, ghi log JSON (eve.json).
-- **python-real-time-service (Sensor)**: đọc eve.json realtime, trích xuất feature, chạy model; nếu bất thường thì gọi API backend.
-- **Backend (Core/Sensor)**: nhận event, ghi DB, tạo alert và tạo `firewall_actions` (tự động hoặc thủ công qua UI).
-- **MySQL (Core/Sensor)**: lưu `tls_events`, `alerts`, `firewall_actions`.
-- **firewall-controller (Firewall)**: poll DB lấy `firewall_actions` trạng thái `PENDING`, chạy iptables và cập nhật `EXECUTED/FAILED`.
-- **Frontend (tùy chọn)**: UI quản trị xem dashboard, alerts, và gửi lệnh chặn thủ công.
+- **suricata**: bắt lưu lượng và ghi `eve.json`
+- **python-real-time-service**: đọc `eve.json`, trích đặc trưng + chạy ML (autoencoder / isolation forest), gửi event sang backend
+- **backend (FastAPI)**: lưu `tls_events`, sinh `alerts`, và (nếu bật) **tạo `firewall_actions` PENDING** để auto-block
+- **firewall-controller**: poll `firewall_actions`, áp rule `iptables` (DROP), cập nhật trạng thái `EXECUTED/FAILED`
+- **frontend**: dashboard read-only (events / alerts / firewall actions)
 
-### 1.2 Luồng dữ liệu
+### 1.2 Luồng dữ liệu (tóm tắt)
 
-1) Suricata ghi TLS event vào `eve.json`.
-2) python-real-time-service đọc log, nếu bất thường → `POST /api/events` lên backend.
-3) Backend ghi `tls_events`, tạo `alerts` (nếu cần).
-4) Nếu bật auto-block hoặc người dùng chặn tay: backend thêm record vào `firewall_actions` (status `PENDING`).
-5) firewall-controller đọc `PENDING` -> chạy iptables (DROP) -> cập nhật status sang `EXECUTED` hoặc `FAILED`.
+1) Suricata → `eve.json`  
+2) python-real-time-service → `POST /api/events` (tùy chọn HMAC)  
+3) Backend:
+   - ghi `tls_events`
+   - nếu cần → tạo `alerts`
+   - nếu `AUTO_BLOCK_ENABLED=true` và severity HIGH/CRITICAL → tạo `firewall_actions` (HMAC-signed)
+4) firewall-controller → apply `iptables` → đánh dấu `EXECUTED`
+5) Frontend → chỉ hiển thị dữ liệu (không login)
 
 ---
 
@@ -29,27 +30,12 @@ Hệ thống gồm **Sensor -> Backend/DB -> Firewall-controller** để phát h
 
 ```
 .
-├── README.md
 ├── backend
-│   ├── Dockerfile
-│   ├── main.py
-│   └── requirements.txt
-├── docker-compose.yml
+├── firewall-controller
+├── frontend
 ├── mysql-init
-│   └── schema.sql
 ├── python-real-time-service
-│   ├── Dockerfile
-│   ├── config.py
-│   ├── feature_extractor.py
-│   ├── log_utils.py
-│   ├── main.py
-│   ├── requirements.txt
-│   └── trained_models
-│       ├── autoencoder_tls.h5
-│       └── scaler.pkl
 └── suricata
-    ├── Dockerfile
-    └── suricata.yaml
 ```
 
 ---
@@ -58,38 +44,41 @@ Hệ thống gồm **Sensor -> Backend/DB -> Firewall-controller** để phát h
 
 ### 3.1 Yêu cầu
 
-- Docker + Docker Compose
-- Có quyền `sudo` (để kiểm tra iptables khi demo chặn thật)
+- Docker + Docker Compose plugin
+- `iptables` (mặc định có trên Ubuntu)
+- Quyền `sudo` (để xem rule iptables khi demo chặn thật)
 
-### 3.2 Start
+### 3.2 Cấu hình
 
-Tạo file cấu hình môi trường (không commit):
+Sửa `.env` (không commit). Tối thiểu cần set đúng:
 
-```bash
-cp .env.example .env
-# sửa các biến quan trọng: MYSQL_ROOT_PASSWORD, MYSQL_PASSWORD, SESSION_HMAC_SECRET,
-# FW_ACTION_HMAC_SECRET, ADMIN_PASSWORD, ...
-```
+- `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD`
+- `FW_ACTION_HMAC_SECRET` (backend và firewall-controller **phải giống nhau**)
+- `IPTABLES_CHAIN` (demo Docker nên dùng `DOCKER-USER`)
+
+> Gợi ý: nếu chỉ demo nhanh, để `REQUIRE_INGEST_HMAC=false` là được.
+
+### 3.3 Start
 
 ```bash
 docker compose up -d --build
 ```
 
-Check backend:
+Kiểm tra backend:
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-UI (nếu đã build frontend):
+Mở UI:
 
-- <http://localhost:8080>
+- http://localhost:8080
 
 ---
 
 ## 4) Test nhanh firewall end-to-end (không cần Suricata/ML)
 
-Mục tiêu: chứng minh `firewall_actions` tạo được và controller chuyển `PENDING → EXECUTED`.
+Mục tiêu: chứng minh backend tạo được `firewall_actions` và controller chuyển `PENDING → EXECUTED`.
 
 ### 4.1 Tạo 1 container client để test chặn (an toàn)
 
@@ -101,37 +90,52 @@ docker run -d --name test-client --network testnet --ip 172.28.0.10 curlimages/c
 docker exec -it test-client curl -I https://example.com
 ```
 
-### 4.2 Tạo lệnh BLOCK qua backend
+### 4.2 Gửi event “CRITICAL” để kích hoạt auto-block
 
-Lấy session token (HMAC-signed):
+Backend sẽ auto-block nếu:
+
+- `AUTO_BLOCK_ENABLED=true` **và**
+- severity là `HIGH` hoặc `CRITICAL`
+
+Severity được tính như sau:
+- `CRITICAL`: `rule_deprecated_version=true` **hoặc** `rule_no_pfs=true`
+- `HIGH`: `rule_weak_cipher=true` **hoặc** `rule_cbc_only=true`
+- `MEDIUM`: `is_anomaly=true` (nhưng không có các rule ở trên)
+
+Ví dụ gửi event với `rule_no_pfs=true` để chắc chắn tạo auto-block:
 
 ```bash
-TOKEN=$(curl -sS -X POST http://localhost:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"Admin@12345"}' | \
-  python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+curl -sS -X POST http://localhost:8000/api/events   -H "Content-Type: application/json"   -d '{
+    "event_time": "'"$NOW"'",
+    "sensor_name": "manual-test",
+    "src_ip": "172.28.0.10",
+    "src_port": 12345,
+    "dst_ip": "93.184.216.34",
+    "dst_port": 443,
+    "proto": "TCP",
+    "tls_version": "TLSv1.2",
+    "sni": "example.com",
+    "ja3_hash": "deadbeefdeadbeefdeadbeefdeadbeef",
+    "rule_no_pfs": true,
+    "is_anomaly": true,
+    "verdict": "ANOMALY"
+  }' | python3 -m json.tool
 ```
 
-Gọi API tạo firewall action (yêu cầu role=admin):
-
-```bash
-curl -X POST http://localhost:8000/api/firewall-actions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"src_ip":"172.28.0.10","action_type":"BLOCK"}'
-```
+> Nếu bật `REQUIRE_INGEST_HMAC=true` trong `.env`, request ingest phải kèm header `X-Timestamp`, `X-Nonce`, `X-Signature` đúng theo quy ước HMAC của backend.
 
 ### 4.3 Kiểm tra DB
 
 ```bash
-docker exec -it tls-mysql mysql -u tls_user -p tls_ids -e \
-"SELECT id,src_ip,action_type,status,executed_at,error_message FROM firewall_actions ORDER BY id DESC LIMIT 10;"
+docker exec -it tls-mysql mysql -u tls_user -p tls_ids -e "SELECT id,src_ip,action_type,status,executed_at,error_message FROM firewall_actions ORDER BY id DESC LIMIT 10;"
 ```
 
 ### 4.4 Kiểm tra rule iptables (demo Docker nên dùng DOCKER-USER)
 
 ```bash
-sudo iptables -S DOCKER-USER | grep 172.28.0.10 || true
+sudo iptables -S DOCKER-USER | tail -n +1
 ```
 
 ### 4.5 Test bị chặn thật
@@ -140,41 +144,25 @@ sudo iptables -S DOCKER-USER | grep 172.28.0.10 || true
 docker exec -it test-client curl -I https://example.com
 ```
 
-Kỳ vọng: timeout / không kết nối.
+Nếu rule đã được áp, request sẽ timeout / bị drop (tùy môi trường mạng).
 
 ---
 
 ## 5) Troubleshooting
 
-### 5.1 Firewall-controller không connect DB (Unknown MySQL server host)
+### 5.1 Firewall-controller không connect DB
 
-- Nếu firewall-controller chạy `network_mode: host` thì nó **không dùng DNS nội bộ compose**.
-- Khi đó DB_HOST nên là `127.0.0.1` (demo 1 máy) và MySQL phải publish port ra host:
-
-Trong service `db`:
-
-```yaml
-ports:
-  - "3306:3306"
-```
-
-Trong firewall-controller (host network):
-
-- `DB_HOST=127.0.0.1`
-- `DB_PORT=3306`
+- Kiểm tra `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` trong service firewall-controller
+- Với mode demo 1 máy (docker-compose.yml), `DB_HOST` là `127.0.0.1` do controller chạy `network_mode: host`
 
 ### 5.2 python-real-time-service restart liên tục
 
-Xem log:
+- Kiểm tra `trained_models/` có đủ `autoencoder_tls.h5` và `scaler.pkl`
+- Xem log:
 
 ```bash
-docker logs --tail 200 project_cryptography--python-realtime-1
+docker logs -f tls-python-realtime
 ```
-
-Các lỗi hay gặp:
-
-- sai mount hoặc sai đường dẫn `EVE_PATH`
-- thiếu file model/scaler trong `trained_models/`
 
 ---
 
@@ -182,18 +170,31 @@ Các lỗi hay gặp:
 
 ### 6.1 Demo 1 máy
 
-Chạy toàn bộ stack trong một máy để chứng minh hệ thống hoạt động.
+- Dùng `docker-compose.yml` (đủ tất cả service)
 
-### 6.2 Sensor
+```bash
+docker compose up -d --build
+```
 
-- Chạy: Suricata + python-real-time-service + backend + MySQL (+ frontend nếu cần)
-- Không chạy firewall-controller trên sensor.
+### 6.2 Sensor (máy đặt gần traffic)
 
-### 6.3 Firewall
+- Dùng `docker-compose.sensor.yml` (không có firewall-controller)
 
-- Chạy: firewall-controller
-- `DB_HOST` phải trỏ về IP của Sensor/Core (không dùng `db` hay `tls-mysql`)
-- `IPTABLES_CHAIN` thường dùng `FORWARD` nếu firewall là gateway.
+```bash
+docker compose -f docker-compose.sensor.yml up -d --build
+```
+
+### 6.3 Firewall (máy nằm ở tuyến chặn)
+
+- Dùng `docker-compose.firewall.yml`
+- **Bắt buộc** sửa `DB_HOST: SENSOR_IP_HERE` trong file compose này thành IP máy sensor (hoặc DB host)
+- Set `IPTABLES_CHAIN` phù hợp:
+  - `FORWARD` nếu chặn ở gateway/router
+  - `DOCKER-USER` nếu chặn traffic container Docker
+
+```bash
+docker compose -f docker-compose.firewall.yml up -d --build
+```
 
 ---
 
@@ -224,18 +225,5 @@ sudo -E python3 main.py
 
 ## 8) Ghi chú an toàn
 
-- Không expose MySQL 3306 ra internet. Chỉ mở trong LAN và giới hạn IP firewall được phép truy cập.
-- Auto-block nên bật trong môi trường lab/demo hoặc khi chấp nhận rủi ro false positive.
-
-Khuyến nghị bật các tuỳ chọn tăng cường:
-
-- **Ký HMAC firewall_actions**: đặt `FW_ACTION_HMAC_SECRET` (backend sẽ ký, firewall-controller sẽ verify).
-- **Chống replay cho admin request** (tuỳ chọn): `REQUIRE_ADMIN_HMAC=true` + `ADMIN_HMAC_SECRET`.
-- **Chống replay/giả mạo đường ingest** (tuỳ chọn): `REQUIRE_INGEST_HMAC=true` + `INGEST_HMAC_SECRET`.
-- **Integrity model** (tuỳ chọn): set `AE_MODEL_SHA256` / `SCALER_SHA256`.
-
-**Bổ sung theo checklist**
-
-- UI/API quản trị dùng session token (HMAC-signed) + phân quyền (admin mới tạo được BLOCK/UNBLOCK).
-- `firewall_actions` được ký HMAC (backend -> firewall-controller) để phát hiện record giả mạo.
-- (Tuỳ chọn) HMAC + nonce + timestamp cho đường ingest (python-realtime -> backend) và đường admin (UI -> backend).
+- `firewall_actions` được ký HMAC (backend → firewall-controller) để hạn chế record giả mạo.
+- (Tuỳ chọn) Bật HMAC cho đường ingest: `REQUIRE_INGEST_HMAC=true` + `INGEST_HMAC_SECRET`.
