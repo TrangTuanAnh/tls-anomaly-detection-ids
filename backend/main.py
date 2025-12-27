@@ -1,6 +1,4 @@
 """TLS IDS Backend (FastAPI)
-
-Bổ sung các phần còn thiếu theo checklist:
 - Session token (HMAC-signed) + bcrypt (passlib) + RBAC
 - Seed admin mặc định
 - Bảo vệ endpoint nhạy cảm (tạo firewall action)
@@ -8,7 +6,7 @@ Bổ sung các phần còn thiếu theo checklist:
 - Audit log cơ bản
 
 Lưu ý: Project này dùng MySQL schema từ mysql-init/schema.sql.
-Nếu bạn đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate để có các cột mới.
+Nếu đã có DB cũ, hãy xóa mysql-data.
 """
 
 from __future__ import annotations

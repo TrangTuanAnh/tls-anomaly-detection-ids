@@ -156,7 +156,6 @@ export default function App() {
           <div className="header">
             <div>
               <div className="h-title">TLS IDS Admin</div>
-              <div className="muted">Login để truy cập dashboard (HMAC session token)</div>
             </div>
           </div>
           <form style={{padding: 16}} onSubmit={doLogin}>
@@ -167,9 +166,6 @@ export default function App() {
             <div className="row" style={{marginTop: 12}}>
               <button className="btn primary" type="submit">Login</button>
               <span className="muted">{loginMsg}</span>
-            </div>
-            <div className="muted" style={{marginTop: 12}}>
-              Default: admin / Admin@12345 (đổi trong .env khi deploy)
             </div>
           </form>
         </div>
@@ -183,7 +179,6 @@ export default function App() {
         <div className="header">
           <div>
             <div className="h-title">TLS IDS Admin</div>
-            <div className="muted">Frontend-only UI (calls Backend API via /api/*)</div>
           </div>
           <div className="row">
             <span className="badge">User: {me ? `${me.username} (${me.role})` : "..."}</span>
