@@ -6,7 +6,7 @@
 - Audit log cơ bản
 
 Lưu ý: Project này dùng MySQL schema từ mysql-init/schema.sql.
-Nếu đã có DB cũ, hãy xóa mysql-data.
+Nếu bạn đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate để có các cột mới.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import FastAPI, Depends, Query, HTTPException, Request
-from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
 
 from sqlalchemy.exc import OperationalError, IntegrityError
@@ -95,7 +94,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 # =========================
@@ -594,40 +592,11 @@ def audit(db, actor: str, action: str, detail: str, src_ip: Optional[str]) -> No
 
 
 # =========================
-# Auth dependencies
-# =========================
-
-
-def get_current_user(db=Depends(get_db), token: str = Depends(oauth2_scheme)) -> User:
-    credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials")
-    try:
-        payload = decode_access_token(token)
-        username: str = payload.get("sub")
-        if not username:
-            raise credentials_exception
-    except HTTPException:
-        raise credentials_exception
-
-    user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise credentials_exception
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Inactive user")
-    return user
-
-
-def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin privilege required")
-    return user
-
-
-# =========================
 # App & routes
 # =========================
 
 
-app = FastAPI(title="TLS IDS Backend")
+app = FastAPI(title="TLS IDS Backend (Read-only UI)")
 
 
 @app.on_event("startup")
@@ -646,79 +615,10 @@ def on_startup():
     else:
         raise RuntimeError("Database not reachable after many retries")
 
-    # Seed admin
-    db = SessionLocal()
-    try:
-        admin = db.query(User).filter(User.username == ADMIN_USERNAME).first()
-        if not admin:
-            db.add(
-                User(
-                    username=ADMIN_USERNAME,
-                    password_hash=password_hash(ADMIN_PASSWORD),
-                    full_name=ADMIN_FULL_NAME,
-                    role="admin",
-                    is_active=True,
-                )
-            )
-            db.commit()
-            print(
-                f"[startup] Seeded admin user '{ADMIN_USERNAME}'. "
-                "(Hãy đổi ADMIN_PASSWORD trong .env khi deploy.)"
-            )
-        else:
-            print(f"[startup] Admin user '{ADMIN_USERNAME}' already exists.")
-    finally:
-        db.close()
-
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-# -------- Auth --------
-
-
-@app.post("/api/auth/login", response_model=TokenOut)
-def login(payload: LoginIn, db=Depends(get_db)):
-    user = db.query(User).filter(User.username == payload.username).first()
-    if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-
-    token = create_access_token(
-        data={"sub": user.username, "role": user.role},
-        expires_minutes=ACCESS_TOKEN_EXPIRE_MINUTES,
-    )
-    return TokenOut(access_token=token)
-
-
-@app.get("/api/auth/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)):
-    return user
-
-
-@app.post("/api/users", response_model=UserOut)
-def create_user(payload: UserCreateIn, admin: User = Depends(require_admin), db=Depends(get_db)):
-    if payload.role not in ("viewer", "analyst", "admin"):
-        raise HTTPException(status_code=400, detail="role must be viewer/analyst/admin")
-
-    u = User(
-        username=payload.username,
-        password_hash=password_hash(payload.password),
-        full_name=payload.full_name,
-        role=payload.role,
-        is_active=True,
-    )
-    db.add(u)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="username already exists")
-    db.refresh(u)
-
-    audit(db, actor=admin.username, action="CREATE_USER", detail=f"user={u.username} role={u.role}", src_ip=None)
-    return u
 
 
 # -------- Events ingest --------
@@ -839,7 +739,6 @@ async def create_event(request: Request, payload: TLSEventIn, db=Depends(get_db)
 def list_events(
     only_anomaly: bool = Query(False),
     limit: int = Query(100, ge=1, le=1000),
-    user: User = Depends(get_current_user),
     db=Depends(get_db),
 ):
     q = db.query(TLSEvent).order_by(TLSEvent.event_time.desc())
@@ -853,7 +752,6 @@ def list_alerts(
     status: Optional[str] = Query(None),
     severity: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
-    user: User = Depends(get_current_user),
     db=Depends(get_db),
 ):
     q = db.query(Alert).order_by(Alert.created_at.desc())
@@ -868,7 +766,6 @@ def list_alerts(
 def list_firewall_actions(
     status: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
-    user: User = Depends(get_current_user),
     db=Depends(get_db),
 ):
     q = db.query(FirewallAction).order_by(FirewallAction.created_at.desc())
@@ -877,56 +774,3 @@ def list_firewall_actions(
     return q.limit(limit).all()
 
 
-@app.post("/api/firewall-actions", response_model=FirewallActionOut)
-async def create_firewall_action(
-    request: Request,
-    payload: FirewallActionIn,
-    admin: User = Depends(require_admin),
-    db=Depends(get_db),
-):
-    act = payload.action_type.upper().strip()
-    if act not in ("BLOCK", "UNBLOCK"):
-        raise HTTPException(status_code=400, detail="action_type must be BLOCK or UNBLOCK")
-
-    # Optional HMAC+nonce for admin calls (browser/UI -> backend)
-    if REQUIRE_ADMIN_HMAC:
-        verify_hmac_headers(
-            db=db,
-            scope="admin",
-            secret=ADMIN_HMAC_SECRET,
-            body_bytes=canonical_json_bytes(payload.dict()),
-            ts_header=request.headers.get("X-Timestamp"),
-            nonce_header=request.headers.get("X-Nonce"),
-            sig_header=request.headers.get("X-Signature"),
-            max_age_sec=ADMIN_HMAC_MAX_AGE_SEC,
-            ttl_sec=ADMIN_HMAC_MAX_AGE_SEC,
-        )
-
-    # Sign the queued firewall action so firewall-controller can verify integrity
-    ts, nonce, sig = sign_firewall_action(act, payload.src_ip)
-
-    fw = FirewallAction(
-        alert_id=None,
-        src_ip=payload.src_ip,
-        action_type=act,
-        target=payload.target or FIREWALL_TARGET,
-        description=payload.description or f"Manual {act} from UI",
-        status="PENDING",
-        expires_at=datetime.utcnow() + timedelta(seconds=FW_ACTION_EXPIRES_SEC),
-        hmac_ts=ts or None,
-        hmac_nonce=nonce or None,
-        hmac_sig=sig or None,
-    )
-    db.add(fw)
-    db.commit()
-    db.refresh(fw)
-
-    audit(
-        db,
-        actor=admin.username,
-        action=f"FW_{act}",
-        detail=f"src_ip={payload.src_ip} target={fw.target}",
-        src_ip=request.client.host if request.client else None,
-    )
-
-    return fw
