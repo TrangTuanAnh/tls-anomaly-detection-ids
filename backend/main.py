@@ -626,13 +626,23 @@ def health():
 
 @app.post("/api/events", response_model=TLSEventOut)
 async def create_event(request: Request, payload: TLSEventIn, db=Depends(get_db)):
+    # Canonicalize the raw JSON body for HMAC verification.
+    # Do NOT use payload.dict() here: Pydantic may convert strings (e.g., event_time) to datetime,
+    # which breaks json.dumps() and also changes the bytes that the realtime service signed.
+    try:
+        raw_obj = await request.json()
+    except Exception:
+        # Fallback (should rarely happen; FastAPI already validated JSON for TLSEventIn)
+        raw_obj = payload.dict()
+    body_bytes = canonical_json_bytes(raw_obj)
+
     # Optional HMAC check (service -> backend)
     if REQUIRE_INGEST_HMAC:
         verify_hmac_headers(
             db=db,
             scope="ingest",
             secret=INGEST_HMAC_SECRET,
-            body_bytes=canonical_json_bytes(payload.dict()),
+            body_bytes=body_bytes,
             ts_header=request.headers.get("X-Timestamp"),
             nonce_header=request.headers.get("X-Nonce"),
             sig_header=request.headers.get("X-Signature"),
@@ -646,7 +656,7 @@ async def create_event(request: Request, payload: TLSEventIn, db=Depends(get_db)
                 db=db,
                 scope="ingest",
                 secret=INGEST_HMAC_SECRET,
-                body_bytes=canonical_json_bytes(payload.dict()),
+                body_bytes=body_bytes,
                 ts_header=request.headers.get("X-Timestamp"),
                 nonce_header=request.headers.get("X-Nonce"),
                 sig_header=request.headers.get("X-Signature"),
