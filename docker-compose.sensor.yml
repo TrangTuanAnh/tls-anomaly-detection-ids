@@ -38,8 +38,6 @@ services:
       DB_PASSWORD: ${MYSQL_PASSWORD}
       AUTO_BLOCK_ENABLED: "true"
       FIREWALL_TARGET: "iptables"
-    ports:
-      - "8000:8000"
     restart: unless-stopped
 
   suricata:
