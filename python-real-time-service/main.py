@@ -80,7 +80,6 @@ def load_models():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(base_dir, "trained_models")
 
-    # Backward-compatible: project.zip hiện có scaler.pkl
     scaler_path_candidates = [
         os.getenv("SCALER_PATH", ""),
         os.path.join(models_dir, "scaler_tls.pkl"),
