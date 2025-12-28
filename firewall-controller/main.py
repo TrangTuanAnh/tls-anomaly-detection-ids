@@ -4,6 +4,7 @@ import socket
 import subprocess
 import hmac
 import hashlib
+import shutil
 from datetime import datetime, timezone
 
 import mysql.connector
@@ -22,7 +23,15 @@ DB_NAME = os.getenv("DB_NAME", "tls_ids")
 
 # Firewall target
 FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "iptables").lower()
-IPTABLES_CHAIN = os.getenv("IPTABLES_CHAIN", "INPUT")  # INPUT by default
+IPTABLES_CHAIN = os.getenv("IPTABLES_CHAIN", "FORWARD")  # FORWARD if firewall is gateway
+
+# iptables binaries (to avoid nft/legacy mismatch if needed)
+IPTABLES_BIN_V4 = os.getenv("IPTABLES_BIN_V4", "iptables")
+IPTABLES_BIN_V6 = os.getenv("IPTABLES_BIN_V6", "ip6tables")
+IPTABLES_WAIT = os.getenv("IPTABLES_WAIT", "true").lower() == "true"  # add -w to avoid lock errors
+
+# "Cut session" support
+FW_KILL_CONNTRACK = os.getenv("FW_KILL_CONNTRACK", "true").lower() == "true"
 
 # Integrity (backend -> firewall-controller)
 FW_ACTION_HMAC_SECRET = os.getenv("FW_ACTION_HMAC_SECRET", "")
@@ -49,17 +58,24 @@ def db_connect():
     )
 
 
-def is_ip(ip: str) -> bool:
+def is_ipv4(ip: str) -> bool:
     try:
         socket.inet_pton(socket.AF_INET, ip)
         return True
     except OSError:
-        pass
+        return False
+
+
+def is_ipv6(ip: str) -> bool:
     try:
         socket.inet_pton(socket.AF_INET6, ip)
         return True
     except OSError:
         return False
+
+
+def is_ip(ip: str) -> bool:
+    return is_ipv4(ip) or is_ipv6(ip)
 
 
 def run_cmd(cmd: list[str]) -> tuple[int, str, str]:
@@ -69,28 +85,126 @@ def run_cmd(cmd: list[str]) -> tuple[int, str, str]:
     return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
-def iptables_rule_exists(src_ip: str) -> bool:
-    # iptables -C INPUT -s <ip> -j DROP
-    code, _, _ = run_cmd(["iptables", "-C", IPTABLES_CHAIN, "-s", src_ip, "-j", "DROP"])
+def ipt_bin_for_ip(ip: str) -> str:
+    if is_ipv6(ip):
+        return IPTABLES_BIN_V6
+    return IPTABLES_BIN_V4
+
+
+def ipt(ip: str, *args: str) -> list[str]:
+    """
+    Build iptables/ip6tables command; add -w if enabled to avoid xtables lock issue.
+    """
+    bin_ = ipt_bin_for_ip(ip)
+    if IPTABLES_WAIT:
+        return [bin_, "-w", *args]
+    return [bin_, *args]
+
+
+def rule_exists(cmd: list[str]) -> bool:
+    code, _, _ = run_cmd(cmd)
     return code == 0
 
 
-def iptables_block(src_ip: str):
-    # Insert at top
-    if iptables_rule_exists(src_ip):
+def kill_conntrack(ip: str):
+    """
+    Best-effort: delete conntrack entries so established sessions drop faster.
+    Works only if conntrack tool exists and container has needed privileges.
+    """
+    if not FW_KILL_CONNTRACK:
         return
-    code, out, err = run_cmd(["iptables", "-I", IPTABLES_CHAIN, "1", "-s", src_ip, "-j", "DROP"])
-    if code != 0:
-        raise RuntimeError(f"iptables block failed: {err or out}")
+    if shutil.which("conntrack") is None:
+        print("[FW][WARN] conntrack not installed -> cannot actively drop existing sessions")
+        return
+
+    # delete entries by source and destination
+    for args in (["conntrack", "-D", "-s", ip], ["conntrack", "-D", "-d", ip]):
+        code, out, err = run_cmd(args)
+        # conntrack returns non-zero if nothing to delete; don't treat as fatal
+        msg = (err or out or "").lower()
+        if code != 0 and ("0 flow entries" not in msg) and ("no such file" not in msg):
+            print(f"[FW][WARN] conntrack delete issue for {ip}: {err or out}")
 
 
-def iptables_unblock(src_ip: str):
-    # Delete rule if exists
-    if not iptables_rule_exists(src_ip):
-        return
-    code, out, err = run_cmd(["iptables", "-D", IPTABLES_CHAIN, "-s", src_ip, "-j", "DROP"])
-    if code != 0:
-        raise RuntimeError(f"iptables unblock failed: {err or out}")
+# -----------------------------
+# IPTABLES: block/unblock 2-way + cut TCP sessions
+# -----------------------------
+
+def iptables_block(ip: str):
+    """
+    Block 2 chiều + ngắt phiên TCP:
+      - TCP: REJECT tcp-reset cho cả -s và -d (đứt nhanh)
+      - All proto: DROP cho cả -s và -d (chặn chắc)
+      - Xóa conntrack (best-effort) để dập session đang ESTABLISHED
+    """
+    if not is_ip(ip):
+        raise RuntimeError(f"Invalid IP: {ip}")
+
+    # kill sessions first (best-effort)
+    kill_conntrack(ip)
+
+    # Desired top-down order (final):
+    # 1) -s ip -p tcp REJECT tcp-reset
+    # 2) -d ip -p tcp REJECT tcp-reset
+    # 3) -s ip DROP
+    # 4) -d ip DROP
+    #
+    # To get that order, insert reverse with -I 1.
+    checks = [
+        ipt(ip, "-C", IPTABLES_CHAIN, "-s", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+        ipt(ip, "-C", IPTABLES_CHAIN, "-d", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+        ipt(ip, "-C", IPTABLES_CHAIN, "-s", ip, "-j", "DROP"),
+        ipt(ip, "-C", IPTABLES_CHAIN, "-d", ip, "-j", "DROP"),
+    ]
+
+    inserts = [
+        ipt(ip, "-I", IPTABLES_CHAIN, "1", "-d", ip, "-j", "DROP"),
+        ipt(ip, "-I", IPTABLES_CHAIN, "1", "-s", ip, "-j", "DROP"),
+        ipt(ip, "-I", IPTABLES_CHAIN, "1", "-d", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+        ipt(ip, "-I", IPTABLES_CHAIN, "1", "-s", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+    ]
+
+    # Insert in reverse-check order so final rules end up in the desired order
+    for chk, ins in zip(reversed(checks), inserts):
+        if not rule_exists(chk):
+            code, out, err = run_cmd(ins)
+            if code != 0:
+                raise RuntimeError(f"iptables insert failed: {err or out}")
+
+
+def iptables_unblock(ip: str):
+    """
+    Remove both directions and both kinds of rules.
+    Use while loops to clean duplicates if they exist.
+    """
+    if not is_ip(ip):
+        raise RuntimeError(f"Invalid IP: {ip}")
+
+    # Exact match check+delete pairs
+    pairs = [
+        (
+            ipt(ip, "-C", IPTABLES_CHAIN, "-s", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+            ipt(ip, "-D", IPTABLES_CHAIN, "-s", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+        ),
+        (
+            ipt(ip, "-C", IPTABLES_CHAIN, "-d", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+            ipt(ip, "-D", IPTABLES_CHAIN, "-d", ip, "-p", "tcp", "-j", "REJECT", "--reject-with", "tcp-reset"),
+        ),
+        (
+            ipt(ip, "-C", IPTABLES_CHAIN, "-s", ip, "-j", "DROP"),
+            ipt(ip, "-D", IPTABLES_CHAIN, "-s", ip, "-j", "DROP"),
+        ),
+        (
+            ipt(ip, "-C", IPTABLES_CHAIN, "-d", ip, "-j", "DROP"),
+            ipt(ip, "-D", IPTABLES_CHAIN, "-d", ip, "-j", "DROP"),
+        ),
+    ]
+
+    for chk, dele in pairs:
+        while rule_exists(chk):
+            code, out, err = run_cmd(dele)
+            if code != 0:
+                raise RuntimeError(f"iptables delete failed: {err or out}")
 
 
 def execute_action(action_type: str, src_ip: str, target: str | None):
@@ -109,6 +223,10 @@ def execute_action(action_type: str, src_ip: str, target: str | None):
     else:
         raise RuntimeError(f"Unknown action_type: {action_type}")
 
+
+# -----------------------------
+# DB fetch + HMAC verify
+# -----------------------------
 
 def fetch_pending_actions(conn, limit: int = 50):
     cur = conn.cursor(dictionary=True)
@@ -158,28 +276,44 @@ def verify_action_hmac(action_type: str, src_ip: str, hmac_ts, hmac_nonce, hmac_
         raise RuntimeError("Invalid signature")
 
 
+# -----------------------------
+# Reconcile logic updated for 2-way + REJECT/DROP
+# -----------------------------
+
 def iptables_list_blocked_ips() -> set[str]:
-    """Parse iptables rules to find -s <ip> -j DROP in IPTABLES_CHAIN."""
-    code, out, err = run_cmd(["iptables", "-S", IPTABLES_CHAIN])
+    """
+    Parse rules in IPTABLES_CHAIN to find IPs blocked by either:
+      - -s ip -j DROP / REJECT
+      - -d ip -j DROP / REJECT
+    Works for both iptables and ip6tables by parsing from the v4 binary output only.
+    (If you use IPv6 blocks, keep IPTABLES_BIN_V6 consistent with host.)
+    """
+    # list rules from v4 binary (covers most cases). If you want full v6 reconcile, run both.
+    code, out, err = run_cmd([IPTABLES_BIN_V4, "-S", IPTABLES_CHAIN])
     if code != 0:
         raise RuntimeError(f"iptables -S failed: {err or out}")
 
     blocked: set[str] = set()
     for line in out.splitlines():
-        # Example: -A DOCKER-USER -s 1.2.3.4/32 -j DROP
         parts = line.split()
-        if "-s" in parts and "-j" in parts:
-            try:
-                s_idx = parts.index("-s")
-                j_idx = parts.index("-j")
-                src = parts[s_idx + 1]
-                target = parts[j_idx + 1]
-                if target == "DROP":
-                    ip = src.split("/")[0]
+        if "-j" not in parts:
+            continue
+        try:
+            j_idx = parts.index("-j")
+            target = parts[j_idx + 1]
+            if target not in ("DROP", "REJECT"):
+                continue
+
+            for flag in ("-s", "-d"):
+                if flag in parts:
+                    idx = parts.index(flag)
+                    val = parts[idx + 1]
+                    ip = val.split("/")[0]
                     if is_ip(ip):
                         blocked.add(ip)
-            except Exception:
-                continue
+        except Exception:
+            continue
+
     return blocked
 
 
@@ -207,20 +341,20 @@ def db_current_blocked_ips(conn, limit: int = 5000) -> set[str]:
 
 
 def reconcile_iptables(conn) -> None:
-    """Detect (and optionally remove) iptables DROP rules that are not reflected in DB."""
+    """Detect (and optionally remove) iptables rules not reflected in DB."""
     try:
         blocked_db = db_current_blocked_ips(conn)
         blocked_fw = iptables_list_blocked_ips()
         extra = blocked_fw - blocked_db
         if extra:
-            print(f"[FW][WARN] Unauthorized/unknown iptables DROP rules: {sorted(extra)[:20]}")
+            print(f"[FW][WARN] Unauthorized/unknown iptables block rules: {sorted(extra)[:20]}")
             if FW_RECONCILE_REMOVE_UNKNOWN:
                 for ip in extra:
                     try:
                         iptables_unblock(ip)
-                        print(f"[FW][OK] Removed unknown DROP rule for {ip}")
+                        print(f"[FW][OK] Removed unknown block rules for {ip}")
                     except Exception as e:
-                        print(f"[FW][WARN] Cannot remove unknown rule {ip}: {e}")
+                        print(f"[FW][WARN] Cannot remove unknown rules {ip}: {e}")
     except Exception as e:
         print(f"[FW][WARN] reconcile failed: {e}")
 
@@ -266,6 +400,8 @@ def main():
     print("[FW] Firewall Controller starting...")
     print(f"[FW] DB={DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} target={FIREWALL_TARGET} chain={IPTABLES_CHAIN}")
     print(f"[FW] DRY_RUN={DRY_RUN} POLL_INTERVAL={POLL_INTERVAL}s")
+    print(f"[FW] IPTABLES_BIN_V4={IPTABLES_BIN_V4} IPTABLES_BIN_V6={IPTABLES_BIN_V6} WAIT={IPTABLES_WAIT}")
+    print(f"[FW] CUT_SESSION: tcp-reset + conntrack={FW_KILL_CONNTRACK} (best-effort)")
 
     last_reconcile = 0.0
 

@@ -28,3 +28,4 @@ Thumbs.db
 # MySQL data directory (docker volume) - KHÔNG commit
 mysql-data/
 
+Report.md
