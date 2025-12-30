@@ -10,9 +10,19 @@ services:
     environment:
       DB_HOST: "SENSOR_IP_HERE"
       DB_PORT: "3306"
-      DB_USER: ${MYSQL_USER:-tls_user}
-      DB_PASSWORD: ${MYSQL_PASSWORD}
-      DB_NAME: ${MYSQL_DATABASE:-tls_ids}
+      DB_USER: ${FW_DB_USER:-fw_user}
+      DB_PASSWORD: ${FW_DB_PASSWORD}
+      DB_NAME: ${FW_DB_NAME:-tls_ids}
       IPTABLES_CHAIN: "FORWARD"
       FW_DRY_RUN: "false"
+      # --- MySQL TLS (khuyến nghị khi firewall-controller connect qua mạng thật) ---
+      # DB_TLS_ENABLED: "true"
+      # DB_SSL_CA: "/pki/mysql/ca.pem"
+      # DB_SSL_CERT: "/pki/mysql/fw-client.pem"
+      # DB_SSL_KEY: "/pki/mysql/fw-client.key"
+      # DB_SSL_VERIFY_CERT: "true"
+      # DB_SSL_VERIFY_IDENTITY: "false"  # bật nếu mysql-connector hỗ trợ
+    volumes:
+      # Mount certs (copy từ sensor host sang firewall host)
+      # - ./pki/mysql:/pki/mysql:ro
     restart: unless-stopped

@@ -1,31 +1,14 @@
-# Python rác
-__pycache__/
-*.py[cod]
-*$py.class
+# secrets / keys
+pki/
+*.key
+*.pem
+*.csr
+*.srl
 
-# Virtualenv
-venv/
-.venv/
-env/
-.env.*
-
-# Logs runtime Suricata: ignore hết, chỉ giữ .gitkeep
-shared/logs/suricata/*
-!shared/logs/suricata/.gitkeep
-
-# Dataset train
-model-training/dataset/*
-!model-training/dataset/.gitkeep
-
-# Editor / OS
-.vscode/
-.idea/
-*.iml
-.DS_Store
-Thumbs.db
-.ipynb_checkpoints/
-
-# MySQL data directory (docker volume) - KHÔNG commit
+# runtime data
 mysql-data/
-
-Report.md
+shared/logs/
+__pycache__/
+*.pyc
+node_modules/
+dist/

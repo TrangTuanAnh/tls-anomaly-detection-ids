@@ -20,6 +20,16 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "tls_pass")
 DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_NAME = os.getenv("DB_NAME", "tls_ids")
+# DB TLS (optional): bảo mật kênh firewall-controller ↔ MySQL
+DB_TLS_ENABLED = os.getenv("DB_TLS_ENABLED", "false").lower() == "true"
+DB_SSL_CA = os.getenv("DB_SSL_CA", "")
+DB_SSL_CERT = os.getenv("DB_SSL_CERT", "")
+DB_SSL_KEY = os.getenv("DB_SSL_KEY", "")
+# Bật verify cert theo CA (khuyến nghị)
+DB_SSL_VERIFY_CERT = os.getenv("DB_SSL_VERIFY_CERT", "true").lower() == "true"
+# Hostname/IP identity verification phụ thuộc mysql-connector version; mặc định tắt để tránh lỗi không tương thích
+DB_SSL_VERIFY_IDENTITY = os.getenv("DB_SSL_VERIFY_IDENTITY", "false").lower() == "true"
+
 
 # Firewall target
 FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "iptables").lower()
@@ -48,6 +58,41 @@ def utc_now():
 
 
 def db_connect():
+    # Fail-closed: nếu đã bật TLS thì bắt buộc có đủ vật liệu
+    if DB_TLS_ENABLED:
+        if not DB_SSL_CA:
+            raise RuntimeError("DB_TLS_ENABLED=true nhưng DB_SSL_CA đang thiếu")
+        # Nếu MySQL user REQUIRE X509 thì cần cert/key
+        if not DB_SSL_CERT or not DB_SSL_KEY:
+            raise RuntimeError("DB_TLS_ENABLED=true nhưng DB_SSL_CERT/DB_SSL_KEY đang thiếu")
+
+        kwargs = dict(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            autocommit=False,
+            ssl_ca=DB_SSL_CA,
+            ssl_cert=DB_SSL_CERT,
+            ssl_key=DB_SSL_KEY,
+            ssl_verify_cert=DB_SSL_VERIFY_CERT,
+        )
+
+        # Một số version mysql-connector hỗ trợ ssl_verify_identity, một số thì không.
+        # Nếu user yêu cầu identity verify mà connector không hỗ trợ -> fail-closed.
+        if DB_SSL_VERIFY_IDENTITY:
+            try:
+                return mysql.connector.connect(**kwargs, ssl_verify_identity=True)
+            except TypeError as e:
+                raise RuntimeError(
+                    "mysql-connector-python không hỗ trợ ssl_verify_identity. "
+                    "Hãy nâng version mysql-connector-python hoặc đặt DB_SSL_VERIFY_IDENTITY=false."
+                ) from e
+
+        return mysql.connector.connect(**kwargs)
+
+    # plaintext (chỉ dùng khi bạn chấp nhận rủi ro)
     return mysql.connector.connect(
         host=DB_HOST,
         port=DB_PORT,

@@ -12,6 +12,9 @@ services:
     volumes:
       - ./mysql-data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d
+      # --- MySQL TLS (optional, để bảo mật kênh firewall-controller ↔ db) ---
+      # - ./pki/mysql:/etc/mysql/certs:ro
+      # - ./mysql-conf/ssl.cnf:/etc/mysql/conf.d/ssl.cnf:ro
     ports:
       - "3306:3306"
     healthcheck:
