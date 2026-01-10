@@ -1,14 +1,3 @@
-"""TLS IDS Backend (FastAPI)
-- Session token (HMAC-signed) + bcrypt (passlib) + RBAC
-- Seed admin mặc định
-- Bảo vệ endpoint nhạy cảm (tạo firewall action)
-- HMAC + nonce + timestamp (tùy chọn) cho request admin và/hoặc ingest
-- Audit log cơ bản
-
-Lưu ý: Project này dùng MySQL schema từ mysql-init/schema.sql.
-Nếu bạn đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate để có các cột mới.
-"""
-
 from __future__ import annotations
 
 import base64

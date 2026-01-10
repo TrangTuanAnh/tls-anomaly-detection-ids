@@ -2,7 +2,7 @@
 
 ## Kiến trúc (tóm tắt)
 
-- **Sensor stack (docker network nội bộ)**: `suricata` → `python-realtime` → `backend` → `db` → `frontend`
+- **Sensor stack (docker network nội bộ)**: `suricata` → `python-realtime` → `backend` → `db`
 - **Firewall host**: `firewall-controller` chạy `network_mode: host` và **polling** bảng `tls_ids.firewall_actions` để apply iptables.
 
 > Suricata + backend chạy trong cùng mạng Docker nội bộ nên kênh đó không phải “điểm đau” hiện tại.  
@@ -22,11 +22,10 @@ docker compose -f docker-compose.sensor.yml up -d --build
 docker compose -f docker-compose.firewall.yml up -d --build
 ```
 
-Mở UI: `http://SENSOR_HOST:8080`
 
 ---
 
-## Bảo mật kênh Firewall Controller - MySQL bằng TLS (khuyến nghị)
+## Bảo mật kênh Firewall Controller ↔ MySQL bằng TLS (khuyến nghị)
 
 ### Option A: Dùng script (nhanh nhất)
 
@@ -38,7 +37,7 @@ chmod +x scripts/gen-mysql-tls.sh
 docker compose -f docker-compose.sensor.yml up -d --force-recreate db
 ```
 
-Nếu muốn script **tạo luôn DB user** riêng cho firewall-controller (bắt buộc X509, không lưu password vào repo):
+Nếu bạn muốn script **tạo luôn DB user** riêng cho firewall-controller (bắt buộc X509, không lưu password vào repo):
 
 ```bash
 ./scripts/gen-mysql-tls.sh --sensor-ip SENSOR_IP_HERE --enable-sensor-compose --create-fw-user

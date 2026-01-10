@@ -67,11 +67,3 @@ services:
     volumes:
       - ./shared/logs/suricata:/shared/logs/suricata
     restart: unless-stopped
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "8080:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
