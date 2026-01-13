@@ -1,6 +1,19 @@
+"""TLS IDS Backend (FastAPI)
+
+Phiên bản rút gọn cho đồ án **không có Front-end**:
+- Giữ nguyên luồng ingest từ python-real-time-service -> POST /api/events
+- Lưu dữ liệu vào bảng `tls_events`
+- (Tuỳ chọn) HMAC + nonce + timestamp cho ingest (chống replay) -> bảng `request_nonces`
+
+Các phần phục vụ Web UI (alerts, firewall_actions, users, audit_logs, session token/RBAC)
+đã được loại bỏ để tránh dư thừa ở DB và backend.
+
+Lưu ý: Project này dùng MySQL schema từ mysql-init/schema.sql.
+Nếu bạn đã có DB cũ, hãy re-init (xóa mysql-data) hoặc tự migrate.
+"""
+
 from __future__ import annotations
 
-import base64
 import hmac
 import hashlib
 import json
@@ -11,7 +24,6 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import FastAPI, Depends, Query, HTTPException, Request
-from passlib.context import CryptContext
 
 from sqlalchemy.exc import OperationalError, IntegrityError
 from sqlalchemy import (
@@ -26,11 +38,10 @@ from sqlalchemy import (
     Boolean,
     Float,
     JSON,
-    ForeignKey,
     func,
     UniqueConstraint,
 )
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+from sqlalchemy.orm import sessionmaker, declarative_base
 
 from pydantic import BaseModel
 
@@ -50,26 +61,12 @@ DATABASE_URL = (
     f"@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
 )
 
-# Login session token (HMAC-signed)
-SESSION_HMAC_SECRET = os.getenv("SESSION_HMAC_SECRET", "")
-SESSION_TOKEN_PREFIX = os.getenv("SESSION_TOKEN_PREFIX", "HMAC1")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@12345")
-ADMIN_FULL_NAME = os.getenv("ADMIN_FULL_NAME", "Default Admin")
-
-# Sensitive endpoints hardening
-REQUIRE_ADMIN_HMAC = os.getenv("REQUIRE_ADMIN_HMAC", "false").lower() == "true"
-ADMIN_HMAC_SECRET = os.getenv("ADMIN_HMAC_SECRET", "")
-ADMIN_HMAC_MAX_AGE_SEC = int(os.getenv("ADMIN_HMAC_MAX_AGE_SEC", "120"))
-
 # Ingest hardening (python-real-time-service -> backend)
 REQUIRE_INGEST_HMAC = os.getenv("REQUIRE_INGEST_HMAC", "false").lower() == "true"
 INGEST_HMAC_SECRET = os.getenv("INGEST_HMAC_SECRET", "")
 INGEST_HMAC_MAX_AGE_SEC = int(os.getenv("INGEST_HMAC_MAX_AGE_SEC", "120"))
 
-# Auto-block
+# Auto-block (backend -> firewall-controller via DB polling)
 AUTO_BLOCK_ENABLED = os.getenv("AUTO_BLOCK_ENABLED", "false").lower() == "true"
 FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "iptables")
 
@@ -77,12 +74,9 @@ FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "iptables")
 FW_ACTION_HMAC_SECRET = os.getenv("FW_ACTION_HMAC_SECRET", "")
 FW_ACTION_EXPIRES_SEC = int(os.getenv("FW_ACTION_EXPIRES_SEC", "3600"))
 
-
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # =========================
@@ -143,41 +137,14 @@ class TLSEvent(Base):
     verdict = Column(String(16), nullable=False, default="NORMAL")
     features_json = Column(JSON)
 
-    alerts = relationship("Alert", back_populates="event", cascade="all, delete-orphan")
-
-
-class Alert(Base):
-    __tablename__ = "alerts"
-
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-
-    tls_event_id = Column(BigInteger, ForeignKey("tls_events.id", ondelete="CASCADE"), nullable=False)
-
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
-
-    severity = Column(String(16), nullable=False)
-    title = Column(String(255), nullable=False)
-    description = Column(Text)
-
-    status = Column(String(16), nullable=False, default="OPEN")
-    resolved_at = Column(DateTime)
-    resolved_note = Column(Text)
-    assigned_to = Column(String(255))
-
-    event = relationship("TLSEvent", back_populates="alerts")
-    firewall_actions = relationship("FirewallAction", back_populates="alert", cascade="all, delete-orphan")
-
 
 class FirewallAction(Base):
     __tablename__ = "firewall_actions"
 
     id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
 
-    alert_id = Column(BigInteger, ForeignKey("alerts.id", ondelete="SET NULL"), nullable=True)
-
     src_ip = Column(String(45), nullable=False)
-    action_type = Column(String(16), nullable=False)
+    action_type = Column(String(16), nullable=False)  # BLOCK / UNBLOCK
 
     target = Column(String(64))
     description = Column(Text)
@@ -194,20 +161,9 @@ class FirewallAction(Base):
     status = Column(String(16), nullable=False, default="PENDING")
     error_message = Column(Text)
 
-    alert = relationship("Alert", back_populates="firewall_actions")
-
-
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    username = Column(String(191), unique=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    full_name = Column(String(255))
-    role = Column(String(50), nullable=False, default="viewer")
-    is_active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-
+    __table_args__ = (
+        UniqueConstraint("hmac_nonce", name="uniq_fw_hmac_nonce"),
+    )
 
 class RequestNonce(Base):
     __tablename__ = "request_nonces"
@@ -221,17 +177,6 @@ class RequestNonce(Base):
     __table_args__ = (
         UniqueConstraint("scope", "nonce", name="uniq_scope_nonce"),
     )
-
-
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
-
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    actor = Column(String(191), nullable=False)
-    action = Column(String(64), nullable=False)
-    detail = Column(Text)
-    src_ip = Column(String(64))
 
 
 # =========================
@@ -298,80 +243,6 @@ class TLSEventOut(TLSEventIn):
     verdict: str
 
 
-class AlertOut(BaseModel):
-    id: int
-    tls_event_id: int
-    created_at: datetime
-    updated_at: datetime
-    severity: str
-    title: str
-    description: Optional[str] = None
-    status: str
-    resolved_at: Optional[datetime] = None
-    resolved_note: Optional[str] = None
-
-    class Config:
-        orm_mode = True
-
-
-class FirewallActionOut(BaseModel):
-    id: int
-    alert_id: Optional[int]
-    src_ip: str
-    action_type: str
-    target: Optional[str]
-    description: Optional[str]
-    created_at: datetime
-    executed_at: Optional[datetime]
-    expires_at: Optional[datetime]
-    status: str
-    error_message: Optional[str]
-
-    # integrity fields (exposed để debug)
-    hmac_ts: Optional[int] = None
-    hmac_nonce: Optional[str] = None
-    hmac_sig: Optional[str] = None
-
-    class Config:
-        orm_mode = True
-
-
-class FirewallActionIn(BaseModel):
-    src_ip: str
-    action_type: str  # BLOCK / UNBLOCK
-    target: Optional[str] = None
-    description: Optional[str] = None
-
-
-class LoginIn(BaseModel):
-    username: str
-    password: str
-
-
-class TokenOut(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-class UserOut(BaseModel):
-    id: int
-    username: str
-    full_name: Optional[str] = None
-    role: str
-    is_active: bool
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
-
-
-class UserCreateIn(BaseModel):
-    username: str
-    password: str
-    full_name: Optional[str] = None
-    role: str = "viewer"
-
-
 # =========================
 # Helpers
 # =========================
@@ -383,83 +254,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
-
-def password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(password: str, stored_hash: str) -> bool:
-    return pwd_context.verify(password, stored_hash)
-
-
-def create_access_token(data: dict, expires_minutes: int) -> str:
-    """Create a compact HMAC-signed session token.
-
-    Format: <prefix>.<payload_b64url>.<sig_hex>
-    Payload is canonical JSON and includes: sub, role, iat, exp.
-    """
-    if not SESSION_HMAC_SECRET:
-        raise RuntimeError("SESSION_HMAC_SECRET not configured")
-
-    now = int(time.time())
-    payload = dict(data)
-    payload.update({
-        "iat": now,
-        "exp": now + int(expires_minutes) * 60,
-    })
-
-    payload_b = canonical_json_bytes(payload)
-    payload_b64 = base64.urlsafe_b64encode(payload_b).rstrip(b"=").decode("ascii")
-
-    sig = hmac.new(
-        SESSION_HMAC_SECRET.encode("utf-8"),
-        payload_b64.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"{SESSION_TOKEN_PREFIX}.{payload_b64}.{sig}"
-
-
-def _b64url_decode(s: str) -> bytes:
-    pad = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad)
-
-
-def decode_access_token(token: str) -> dict:
-    if not SESSION_HMAC_SECRET:
-        raise HTTPException(status_code=500, detail="SESSION_HMAC_SECRET not configured")
-
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    prefix, payload_b64, sig = parts
-    if prefix != SESSION_TOKEN_PREFIX:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    expected = hmac.new(
-        SESSION_HMAC_SECRET.encode("utf-8"),
-        payload_b64.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    if not hmac.compare_digest(expected, sig.strip().lower()):
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    try:
-        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    exp = payload.get("exp")
-    if exp is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    try:
-        exp_i = int(exp)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    if int(time.time()) > exp_i:
-        raise HTTPException(status_code=401, detail="Token expired")
-
-    return payload
 
 
 def canonical_json_bytes(obj: object) -> bytes:
@@ -545,6 +339,14 @@ def compute_verdict(is_anomaly: bool) -> str:
 
 
 def compute_severity(payload: TLSEventIn, is_anomaly: bool) -> Optional[str]:
+    """Severity used for auto-block decision.
+
+    Giữ tiêu chí giống bản đầy đủ:
+    - CRITICAL: deprecated TLS version OR no PFS
+    - HIGH: weak cipher OR CBC-only
+    - MEDIUM: ML anomaly
+    - None: không có vấn đề
+    """
     if not is_anomaly and not any(
         [payload.rule_deprecated_version, payload.rule_no_pfs, payload.rule_weak_cipher, payload.rule_cbc_only]
     ):
@@ -560,9 +362,12 @@ def compute_severity(payload: TLSEventIn, is_anomaly: bool) -> Optional[str]:
 
 
 def sign_firewall_action(action_type: str, src_ip: str) -> tuple[int, str, str]:
-    """Return (ts, nonce, sig)."""
+    """Return (ts, nonce, sig).
+
+    Must match firewall-controller.verify_action_hmac() format:
+      f"{action_type}|{src_ip}|{ts}|{nonce}"
+    """
     if not FW_ACTION_HMAC_SECRET:
-        # không cấu hình => vẫn tạo record nhưng để trống field; firewall-controller có thể từ chối.
         return 0, "", ""
 
     ts = int(time.time())
@@ -572,12 +377,7 @@ def sign_firewall_action(action_type: str, src_ip: str) -> tuple[int, str, str]:
     return ts, nonce, sig
 
 
-def audit(db, actor: str, action: str, detail: str, src_ip: Optional[str]) -> None:
-    try:
-        db.add(AuditLog(actor=actor, action=action, detail=detail, src_ip=src_ip))
-        db.commit()
-    except Exception:
-        db.rollback()
+ 
 
 
 # =========================
@@ -585,7 +385,7 @@ def audit(db, actor: str, action: str, detail: str, src_ip: Optional[str]) -> No
 # =========================
 
 
-app = FastAPI(title="TLS IDS Backend (Read-only UI)")
+app = FastAPI(title="TLS IDS Backend")
 
 
 @app.on_event("startup")
@@ -701,23 +501,12 @@ async def create_event(request: Request, payload: TLSEventIn, db=Depends(get_db)
     db.commit()
     db.refresh(evt)
 
-    severity = compute_severity(payload, is_anom)
-    if severity:
-        alert = Alert(
-            tls_event_id=evt.id,
-            severity=severity,
-            title="TLS anomaly detected",
-            description="Automatic alert generated by TLS IDS backend",
-            status="OPEN",
-        )
-        db.add(alert)
-        db.commit()
-        db.refresh(alert)
-
-        if AUTO_BLOCK_ENABLED and severity in ("HIGH", "CRITICAL"):
+    # Auto-block: tạo record cho firewall-controller polling (không cần Web UI)
+    if AUTO_BLOCK_ENABLED:
+        severity = compute_severity(payload, is_anom)
+        if severity in ("HIGH", "CRITICAL"):
             ts, nonce, sig = sign_firewall_action("BLOCK", evt.src_ip)
             fw = FirewallAction(
-                alert_id=alert.id,
                 src_ip=evt.src_ip,
                 action_type="BLOCK",
                 target=FIREWALL_TARGET,
@@ -746,30 +535,6 @@ def list_events(
     return q.limit(limit).all()
 
 
-@app.get("/api/alerts", response_model=List[AlertOut])
-def list_alerts(
-    status: Optional[str] = Query(None),
-    severity: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=1000),
-    db=Depends(get_db),
-):
-    q = db.query(Alert).order_by(Alert.created_at.desc())
-    if status:
-        q = q.filter(Alert.status == status)
-    if severity:
-        q = q.filter(Alert.severity == severity)
-    return q.limit(limit).all()
 
-
-@app.get("/api/firewall-actions", response_model=List[FirewallActionOut])
-def list_firewall_actions(
-    status: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=1000),
-    db=Depends(get_db),
-):
-    q = db.query(FirewallAction).order_by(FirewallAction.created_at.desc())
-    if status:
-        q = q.filter(FirewallAction.status == status)
-    return q.limit(limit).all()
 
 

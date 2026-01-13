@@ -1,7 +1,9 @@
 -- ==========================================
 --  TLS Anomaly Detection - MySQL schema
---  (minimal version: tls_events, alerts,
---   firewall_actions, users)
+--  (rút gọn cho đồ án không có Front-end)
+--  Chỉ giữ:
+--   - tls_events: log TLS + kết quả ML
+--   - request_nonces: (tuỳ chọn) chống replay cho ingest HMAC
 
 CREATE DATABASE IF NOT EXISTS tls_ids
   CHARACTER SET utf8mb4
@@ -93,92 +95,7 @@ CREATE TABLE tls_events (
   COLLATE=utf8mb4_unicode_ci;
 
 
---  2. Bảng alerts
---    - Cảnh báo sinh ra từ tls_events
-CREATE TABLE alerts (
-    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-
-    tls_event_id    BIGINT UNSIGNED NOT NULL,
-
-    created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-                                      ON UPDATE CURRENT_TIMESTAMP(6),
-
-    severity        ENUM('LOW', 'MEDIUM', 'HIGH', 'CRITICAL') NOT NULL,
-    title           VARCHAR(255) NOT NULL,
-    description     TEXT NULL,
-
-    status          ENUM('OPEN', 'IN_PROGRESS', 'RESOLVED', 'DISMISSED')
-                        NOT NULL DEFAULT 'OPEN',
-    resolved_at     DATETIME(6) NULL,
-    resolved_note   TEXT NULL,
-
-    assigned_to     VARCHAR(255) NULL, -- có thể map sang users.username sau này
-
-    PRIMARY KEY (id),
-
-    INDEX idx_alerts_created_at (created_at),
-    INDEX idx_alerts_status (status),
-    INDEX idx_alerts_severity (severity),
-    INDEX idx_alerts_tls_event_id (tls_event_id),
-
-    CONSTRAINT fk_alerts_tls_event
-        FOREIGN KEY (tls_event_id)
-        REFERENCES tls_events(id)
-        ON DELETE CASCADE
-) ENGINE=InnoDB
-  DEFAULT CHARSET=utf8mb4
-  COLLATE=utf8mb4_unicode_ci;
-
-
---  3. Bảng firewall_actions
---    - Lưu yêu cầu BLOCK/UNBLOCK IP
-CREATE TABLE firewall_actions (
-    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-
-    alert_id        BIGINT UNSIGNED NULL,
-
-    src_ip          VARCHAR(45) NOT NULL,
-    action_type     ENUM('BLOCK', 'UNBLOCK') NOT NULL,
-
-    target          VARCHAR(64) NULL,           -- vd: 'iptables', 'pfsense', ...
-    description     TEXT NULL,
-
-    created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    executed_at     DATETIME(6) NULL,
-    expires_at      DATETIME(6) NULL,
-
-    -- Integrity (backend -> firewall-controller)
-    -- Dùng để firewall-controller xác thực hành động đến từ backend hợp lệ,
-    -- tránh DB bị sửa/tạo record giả.
-    hmac_ts         BIGINT NULL,
-    hmac_nonce      VARCHAR(64) NULL,
-    hmac_sig        CHAR(64) NULL,
-
-    status          ENUM('PENDING', 'EXECUTED', 'FAILED', 'CANCELLED')
-                        NOT NULL DEFAULT 'PENDING',
-    error_message   TEXT NULL,
-
-    PRIMARY KEY (id),
-
-    INDEX idx_fw_actions_status (status),
-    INDEX idx_fw_actions_created_at (created_at),
-    INDEX idx_fw_actions_src_ip (src_ip),
-    INDEX idx_fw_actions_alert_id (alert_id),
-
-    -- chống replay / record giả mạo (nếu đã có nonce thì không cho trùng)
-    UNIQUE KEY uniq_fw_hmac_nonce (hmac_nonce),
-
-    CONSTRAINT fk_fw_actions_alert
-        FOREIGN KEY (alert_id)
-        REFERENCES alerts(id)
-        ON DELETE SET NULL
-) ENGINE=InnoDB
-  DEFAULT CHARSET=utf8mb4
-  COLLATE=utf8mb4_unicode_ci;
-
-
---  5. Bảng request_nonces
+--  2. Bảng request_nonces
 --    - Lưu nonce đã dùng để chống replay (HMAC + nonce + timestamp)
 CREATE TABLE request_nonces (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -194,35 +111,36 @@ CREATE TABLE request_nonces (
   COLLATE=utf8mb4_unicode_ci;
 
 
---  6. Bảng audit_logs
---    - Nhật ký thao tác admin (đặc biệt là block/unblock)
-CREATE TABLE audit_logs (
+--  3. Bảng firewall_actions
+--    - Lưu yêu cầu BLOCK/UNBLOCK IP để firewall-controller polling và apply iptables
+CREATE TABLE firewall_actions (
     id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+
+    src_ip          VARCHAR(45) NOT NULL,
+    action_type     ENUM('BLOCK', 'UNBLOCK') NOT NULL,
+
+    target          VARCHAR(64) NULL,           -- vd: 'iptables'
+    description     TEXT NULL,
+
     created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    actor           VARCHAR(191) NOT NULL,
-    action          VARCHAR(64) NOT NULL,
-    detail          TEXT NULL,
-    src_ip          VARCHAR(64) NULL,
+    executed_at     DATETIME(6) NULL,
+    expires_at      DATETIME(6) NULL,
+
+    -- Integrity (backend -> firewall-controller)
+    hmac_ts         BIGINT NULL,
+    hmac_nonce      VARCHAR(64) NULL,
+    hmac_sig        CHAR(64) NULL,
+
+    status          ENUM('PENDING', 'EXECUTED', 'FAILED', 'CANCELLED')
+                        NOT NULL DEFAULT 'PENDING',
+    error_message   TEXT NULL,
+
     PRIMARY KEY (id),
-    INDEX idx_audit_created_at (created_at),
-    INDEX idx_audit_actor (actor)
-) ENGINE=InnoDB
-  DEFAULT CHARSET=utf8mb4
-  COLLATE=utf8mb4_unicode_ci;
 
-
---  4. Bảng users (tuỳ chọn nhưng nên có)
---    - Dùng cho Web UI / phân quyền xử lý alert
-CREATE TABLE users (
-    id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    username        VARCHAR(191) NOT NULL UNIQUE,
-    password_hash   VARCHAR(255) NOT NULL,
-    full_name       VARCHAR(255) NULL,
-    role            VARCHAR(50) NOT NULL DEFAULT 'viewer',  -- viewer / analyst / admin
-    is_active       TINYINT(1) NOT NULL DEFAULT 1,
-    created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-
-    PRIMARY KEY (id)
+    INDEX idx_fw_actions_status (status),
+    INDEX idx_fw_actions_created_at (created_at),
+    INDEX idx_fw_actions_src_ip (src_ip),
+    UNIQUE KEY uniq_fw_hmac_nonce (hmac_nonce)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci;

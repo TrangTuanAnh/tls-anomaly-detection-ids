@@ -1,9 +1,11 @@
 # TLS Anomaly Detection (Suricata + Realtime ML + FastAPI + Firewall Controller)
 
+> Bản rút gọn cho đồ án **không có Front-end**: backend chỉ lưu `tls_events` và (tuỳ chọn) tạo `firewall_actions` khi bật `AUTO_BLOCK_ENABLED=true`. Các bảng/cơ chế phục vụ Web UI (alerts, users, audit...) đã được bỏ.
+
 ## Kiến trúc (tóm tắt)
 
 - **Sensor stack (docker network nội bộ)**: `suricata` → `python-realtime` → `backend` → `db`
-- **Firewall host**: `firewall-controller` chạy `network_mode: host` và **polling** bảng `tls_ids.firewall_actions` để apply iptables.
+- **Firewall host**: `firewall-controller` chạy `network_mode: host` và **polling** bảng `tls_ids.firewall_actions` để apply iptables (nếu bật auto-block).
 
 > Suricata + backend chạy trong cùng mạng Docker nội bộ nên kênh đó không phải “điểm đau” hiện tại.  
 > **Điểm cần bảo mật**: kênh **firewall-controller ↔ MySQL (3306)** đang đi qua mạng thật và hiện đang **không TLS**.

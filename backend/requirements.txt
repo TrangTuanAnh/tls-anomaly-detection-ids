@@ -3,6 +3,4 @@ uvicorn[standard]
 sqlalchemy
 mysql-connector-python
 pydantic
-passlib==1.7.4
-bcrypt==3.2.2
 
