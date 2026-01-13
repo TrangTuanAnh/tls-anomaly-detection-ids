@@ -1,7 +1,7 @@
 services:
   db:
     image: mysql:8.0
-    container_name: tls-mysql
+    container_name: flow-mysql
     env_file:
       - .env
     environment:
@@ -12,22 +12,16 @@ services:
     volumes:
       - ./mysql-data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d
-      # --- MySQL TLS (optional, để bảo mật kênh firewall-controller ↔ db) ---
-      # - ./pki/mysql:/etc/mysql/certs:ro
-      # - ./mysql-conf/ssl.cnf:/etc/mysql/conf.d/ssl.cnf:ro
-    ports:
-      - "3306:3306"
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$MYSQL_ROOT_PASSWORD"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 3s
-      retries: 10
-      start_period: 20s
+      retries: 30
     restart: unless-stopped
 
   backend:
     build: ./backend
-    container_name: tls-backend
+    container_name: flow-backend
     depends_on:
       db:
         condition: service_healthy
@@ -39,31 +33,50 @@ services:
       DB_NAME: ${MYSQL_DATABASE:-tls_ids}
       DB_USER: ${MYSQL_USER:-tls_user}
       DB_PASSWORD: ${MYSQL_PASSWORD}
-      AUTO_BLOCK_ENABLED: "true"
-      FIREWALL_TARGET: "iptables"
+      REQUIRE_INGEST_HMAC: ${REQUIRE_INGEST_HMAC:-false}
+      INGEST_HMAC_SECRET: ${INGEST_HMAC_SECRET:-}
+      INGEST_HMAC_MAX_AGE_SEC: ${INGEST_HMAC_MAX_AGE_SEC:-120}
+      AUTO_BLOCK: ${AUTO_BLOCK:-false}
+    ports:
+      - "8000:8000"
     restart: unless-stopped
 
-  suricata:
-    build: ./suricata
+  cicflowmeter:
+    build: ./cicflowmeter
+    container_name: cicflowmeter-sniffer
     network_mode: "host"
     cap_add:
       - NET_ADMIN
       - NET_RAW
-      - SYS_NICE
+    # easiest for sniffing in many environments:
+    # privileged: true
+    env_file:
+      - .env
+    environment:
+      CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
+      FLOW_CSV_PATH: /shared/flows/flows.csv
     volumes:
-      - ./shared/logs/suricata:/var/log/suricata
+      - ./shared/flows:/shared/flows
     restart: unless-stopped
 
   python-realtime:
     build: ./python-real-time-service
+    container_name: flow-rt
     depends_on:
-      - suricata
       - backend
     env_file:
       - .env
     environment:
       BACKEND_URL: http://backend:8000
-      EVE_PATH: /shared/logs/suricata/eve.json
+      FLOW_CSV_PATH: /shared/flows/flows.csv
+      AE_THRESHOLD: ${AE_THRESHOLD:-0.05}
+      ISO_THRESHOLD: ${ISO_THRESHOLD:--0.1}
+      REQUIRE_INGEST_HMAC: ${REQUIRE_INGEST_HMAC:-false}
+      INGEST_HMAC_SECRET: ${INGEST_HMAC_SECRET:-}
+      INGEST_HMAC_MAX_AGE_SEC: ${INGEST_HMAC_MAX_AGE_SEC:-120}
+      AE_MODEL_SHA256: ${AE_MODEL_SHA256:-}
+      SCALER_SHA256: ${SCALER_SHA256:-}
     volumes:
-      - ./shared/logs/suricata:/shared/logs/suricata
+      - ./shared/flows:/shared/flows
+      - ./python-real-time-service/trained_models:/app/trained_models:ro
     restart: unless-stopped

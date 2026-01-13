@@ -1,298 +1,201 @@
+# python-real-time-service/feature_extractor.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple, Any, List
 import re
-from typing import List, Tuple
+import math
 
-import pandas as pd
+import numpy as np
+from dateutil import parser as dtparser
 
-# ===========================
-#  TLS / JA3 helper constants
-# ===========================
-
-# Map TLS version string -> enum
-# theo spec trong report: TLS1.0→1, 1.1→2, 1.2→3, 1.3→4
-VERSION_ENUM = {
-    "TLS 1.0": 1,
-    "TLS 1.1": 2,
-    "TLS 1.2": 3,
-    "TLS 1.3": 4,
-}
-
-# Bộ mã nhóm elliptic curve / DH groups hiện đại
-# (JA3 field 4 - Supported Groups)
-MODERN_GROUPS = {
-    29,  # x25519
-    23,  # secp256r1 (P-256)
-    24,  # secp384r1 (P-384)
-    25,  # secp521r1 (coi như modern luôn)
-}
-
-# Bảng gắn nhãn cipher theo "bảng nội bộ"
-# Mỗi entry:
-#   cipher_id: {
-#       "name": "...",
-#       "strong": True/False,
-#       "weak": True/False,
-#       "pfs": True/False,   # có Perfect Forward Secrecy (DHE/ECDHE/TLS1.3)
-#       "aead": True/False,  # AEAD (GCM/CHACHA/CCM)
-#       "kx": "ECDHE"/"DHE"/"RSA"/"ECDH"/"DH"/"TLS13"/"UNKNOWN"
-#   }
-CIPHER_POLICIES = {
-    # TLS 1.3 AEAD ciphers (tất cả đều mạnh + PFS)
-    4865: {"name": "TLS_AES_128_GCM_SHA256",        "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "TLS13"},
-    4866: {"name": "TLS_AES_256_GCM_SHA384",        "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "TLS13"},
-    4867: {"name": "TLS_CHACHA20_POLY1305_SHA256",  "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "TLS13"},
-    4868: {"name": "TLS_AES_128_CCM_SHA256",        "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "TLS13"},
-    4869: {"name": "TLS_AES_128_CCM_8_SHA256",      "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "TLS13"},
-
-    # Một số ECDHE + GCM (mạnh, PFS, AEAD)
-    49195: {"name": "ECDHE_RSA_AES_128_GCM_SHA256", "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "ECDHE"},
-    49196: {"name": "ECDHE_RSA_AES_256_GCM_SHA384", "strong": True, "weak": False, "pfs": True,  "aead": True,  "kx": "ECDHE"},
-    49199: {"name": "ECDHE_ECDSA_AES_128_GCM_SHA256","strong": True,"weak": False, "pfs": True,  "aead": True,  "kx": "ECDHE"},
-    49200: {"name": "ECDHE_ECDSA_AES_256_GCM_SHA384","strong": True,"weak": False, "pfs": True,  "aead": True,  "kx": "ECDHE"},
-
-    # Một số ECDHE + CBC (PFS nhưng không AEAD)
-    49171: {"name": "ECDHE_RSA_AES_128_CBC_SHA256", "strong": False, "weak": False, "pfs": True, "aead": False, "kx": "ECDHE"},
-    49172: {"name": "ECDHE_RSA_AES_256_CBC_SHA384", "strong": False, "weak": False, "pfs": True, "aead": False, "kx": "ECDHE"},
-
-    # RSA + CBC (không PFS, xem là yếu/legacy hơn)
-    47:  {"name": "RSA_AES_128_CBC_SHA",            "strong": False, "weak": True,  "pfs": False, "aead": False, "kx": "RSA"},
-    53:  {"name": "RSA_AES_256_CBC_SHA",            "strong": False, "weak": True,  "pfs": False, "aead": False, "kx": "RSA"},
-    10:  {"name": "RSA_3DES_EDE_CBC_SHA",           "strong": False, "weak": True,  "pfs": False, "aead": False, "kx": "RSA"},  # 3DES
-    5:   {"name": "RSA_RC4_128_SHA",                "strong": False, "weak": True,  "pfs": False, "aead": False, "kx": "RSA"},  # RC4
-    4:   {"name": "RSA_RC4_128_MD5",                "strong": False, "weak": True,  "pfs": False, "aead": False, "kx": "RSA"},  # RC4
-    # ... (tự mở rộng thêm nếu cần)
-}
-
-# ==================
-#  Helper functions
-# ==================
-
-def normalize_version_string(version: str) -> str:
-    """Chuẩn hóa version về dạng 'TLS 1.2', 'SSL 3.0', ..."""
-    if not isinstance(version, str):
-        return ""
-    s = version.strip().upper()
-    # Bắt (TLS|SSL) + optional 'v' + số version
-    m = re.search(r"(TLS|SSL)\s*v? ?(\d(?:\.\d)?)", s)
-    if not m:
-        return s
-    proto = m.group(1)
-    ver = m.group(2)
-    return f"{proto} {ver}"
+_ws_re = re.compile(r"\s+")
 
 
-def compute_tls_version_features(version: str):
-    """Tính tls_version_enum, is_legacy_version, RULE_DEPRECATED_VERSION."""
-    norm = normalize_version_string(version)
-    enum_val = VERSION_ENUM.get(norm, 0 if norm.startswith("SSL") else -1)
+# NOTE:
+# dataset_filter.py says "39 features" but the actual list currently has 43 items.
+# We follow the list content as the source of truth.
+FEATURES: List[str] = [
+    # Flow & volume
+    "Flow Duration",
+    "Total Fwd Packets",
+    "Total Backward Packets",
+    "Total Length of Fwd Packets",
+    "Total Length of Bwd Packets",
+    "Flow Bytes/s",
+    "Flow Packets/s",
 
-    # is_legacy_version: 1 nếu TLS version < 1.2
-    is_legacy = 0
-    if enum_val != -1 and enum_val < VERSION_ENUM.get("TLS 1.2"):
-        is_legacy = 1
-    if norm.startswith("SSL"):
-        is_legacy = 1
+    # Packet length (forward)
+    "Fwd Packet Length Min",
+    "Fwd Packet Length Max",
+    "Fwd Packet Length Mean",
+    "Fwd Packet Length Std",
 
-    # RULE_DEPRECATED_VERSION: SSLv2/SSLv3/TLS1.0/TLS1.1
-    deprecated = {
-        "SSL 2.0", "SSL 2", "SSL 3.0", "SSL 3",
-        "TLS 1.0", "TLS 1.1",
-    }
-    rule_deprecated = 1 if norm in deprecated else 0
+    # Packet length (backward)
+    "Bwd Packet Length Min",
+    "Bwd Packet Length Max",
+    "Bwd Packet Length Mean",
+    "Bwd Packet Length Std",
 
-    return enum_val, is_legacy, rule_deprecated
+    # Packet length (global)
+    "Min Packet Length",
+    "Max Packet Length",
+    "Packet Length Mean",
+    "Packet Length Std",
+    "Packet Length Variance",
+    "Average Packet Size",
+    "Avg Fwd Segment Size",
+    "Avg Bwd Segment Size",
+
+    # Timing (IAT)
+    "Flow IAT Mean",
+    "Flow IAT Std",
+    "Flow IAT Max",
+    "Flow IAT Min",
+    "Fwd IAT Mean",
+    "Fwd IAT Std",
+    "Fwd IAT Max",
+    "Fwd IAT Min",
+    "Bwd IAT Mean",
+    "Bwd IAT Std",
+    "Bwd IAT Max",
+    "Bwd IAT Min",
+
+    # Direction
+    "Fwd Packets/s",
+    "Bwd Packets/s",
+    "Down/Up Ratio",
+
+    # TCP flags (core)
+    "FIN Flag Count",
+    "SYN Flag Count",
+    "RST Flag Count",
+    "PSH Flag Count",
+    "ACK Flag Count",
+]
 
 
-def parse_ja3_string(ja3_string: str):
-    """
-    Tách JA3 string: SSLVersion,Ciphers,Extensions,EllipticCurves,ECPointFormats
-    Trả về: (list_ciphers, list_extensions, list_groups, list_ec_formats)
-    """
-    if not isinstance(ja3_string, str) or not ja3_string:
-        return [], [], [], []
-
-    parts = ja3_string.strip().split(",")
-    # đảm bảo đủ 5 field
-    while len(parts) < 5:
-        parts.append("")
-
-    _, ciphers_field, exts_field, groups_field, ec_formats_field = parts
-
-    def parse_int_list(field: str):
-        if not field:
-            return []
-        return [int(x) for x in field.split("-") if x]
-
-    ciphers = parse_int_list(ciphers_field)
-    exts = parse_int_list(exts_field)
-    groups = parse_int_list(groups_field)
-    ec_formats = parse_int_list(ec_formats_field)
-    return ciphers, exts, groups, ec_formats
+def _norm_key(k: str) -> str:
+    k = (k or "").strip()
+    k = _ws_re.sub(" ", k)
+    return k
 
 
-def parse_ja3s_string(ja3s_string: str):
-    """
-    JA3S string: SSLVersion,Cipher,Extensions
-    Trả về: (server_version_id, server_cipher_id, extensions_list)
-    """
-    if not isinstance(ja3s_string, str) or not ja3s_string:
-        return None, None, []
+def normalize_row_keys(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {_norm_key(k): v for k, v in row.items()}
 
-    parts = ja3s_string.strip().split(",")
-    while len(parts) < 3:
-        parts.append("")
 
-    version_field, cipher_field, exts_field = parts
-
+def _to_float(x: Any) -> float:
+    if x is None:
+        return 0.0
+    if isinstance(x, (int, float)):
+        if isinstance(x, float) and (math.isinf(x) or math.isnan(x)):
+            return 0.0
+        return float(x)
+    s = str(x).strip()
+    if not s:
+        return 0.0
+    # some CICFlowMeter outputs use 'Infinity'
+    if s.lower() in {"inf", "infinity", "+inf", "-inf", "nan"}:
+        return 0.0
     try:
-        version_id = int(version_field) if version_field else None
-    except ValueError:
-        version_id = None
-
-    try:
-        cipher_id = int(cipher_field) if cipher_field else None
-    except ValueError:
-        cipher_id = None
-
-    exts = [int(x) for x in exts_field.split("-") if x] if exts_field else []
-    return version_id, cipher_id, exts
+        v = float(s)
+        if math.isinf(v) or math.isnan(v):
+            return 0.0
+        return v
+    except Exception:
+        return 0.0
 
 
-def classify_cipher(cipher_id: int):
-    """Trả về thông tin cipher; nếu không biết thì cho UNKNOWN."""
-    props = CIPHER_POLICIES.get(cipher_id)
-    if props is None:
-        return {
-            "name": "UNKNOWN",
-            "strong": False,
-            "weak": False,
-            "pfs": False,
-            "aead": False,
-            "kx": "UNKNOWN",
-        }
-    return props
+@dataclass
+class FlowMeta:
+    event_time: datetime
+    sensor_name: Optional[str]
+    flow_id: Optional[int]
+    src_ip: str
+    src_port: Optional[int]
+    dst_ip: str
+    dst_port: Optional[int]
+    proto: Optional[str]
 
 
-def compute_feature_row(row: pd.Series) -> pd.Series:
-    """
-    Tính toàn bộ feature/rule đúng như trong report cho 1 bản ghi TLS.
-    row cần có: 'version', 'ja3_string', 'ja3s_string'
-    """
-    version = row.get("version", "")
-    ja3_string = row.get("ja3_string", "")
-    ja3s_string = row.get("ja3s_string", "")
+def _pick(row: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    for k in keys:
+        if k in row and str(row[k]).strip() != "":
+            return str(row[k]).strip()
+    return None
 
-    # --- Parse JA3 ---
-    ciphers, exts, groups, ec_formats = parse_ja3_string(ja3_string)
-    num_ciphers = len(ciphers)
-    num_groups = len(groups)
 
-    num_strong = 0
-    num_weak = 0
-    num_pfs = 0
-    num_aead = 0
+def extract_flow_meta(row_in: Dict[str, Any], sensor_name: Optional[str] = None) -> FlowMeta:
+    row = normalize_row_keys(row_in)
 
-    for cid in ciphers:
-        props = classify_cipher(cid)
-        if props["strong"]:
-            num_strong += 1
-        if props["weak"]:
-            num_weak += 1
-        if props["pfs"]:
-            num_pfs += 1
-        if props["aead"]:
-            num_aead += 1
+    # CICFlowMeter / cicflowmeter commonly outputs these columns
+    ts = _pick(row, ["Timestamp", "Flow Start Time", "Start Time", "time", "Time"])
+    if ts:
+        try:
+            event_time = dtparser.parse(ts)
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+        except Exception:
+            event_time = datetime.now(timezone.utc)
+    else:
+        event_time = datetime.now(timezone.utc)
 
-    weak_cipher_ratio = (num_weak / num_ciphers) if num_ciphers > 0 else 0.0
-    pfs_cipher_ratio = (num_pfs / num_ciphers) if num_ciphers > 0 else 0.0
-    supports_pfs = 1 if num_pfs > 0 else 0
+    flow_id_s = _pick(row, ["Flow ID", "flow_id", "FlowId", "FlowID"])
+    flow_id = None
+    if flow_id_s:
+        try:
+            flow_id = int(float(flow_id_s))
+        except Exception:
+            flow_id = None
 
-    prefers_pfs = 0
-    if num_ciphers > 0:
-        first_props = classify_cipher(ciphers[0])
-        prefers_pfs = 1 if first_props["pfs"] else 0
+    src_ip = _pick(row, ["Source IP", "Src IP", "src_ip", "src"])
+    dst_ip = _pick(row, ["Destination IP", "Dst IP", "dest_ip", "dst"])
 
-    # --- Elliptic curve / DH group features ---
-    num_modern = len([g for g in groups if g in MODERN_GROUPS])
-    uses_modern_group = 1 if num_modern > 0 else 0
-    legacy_group_ratio = (
-        (num_groups - num_modern) / num_groups if num_groups > 0 else 0.0
-    )
+    if not src_ip:
+        src_ip = "0.0.0.0"
+    if not dst_ip:
+        dst_ip = "0.0.0.0"
 
-    # --- TLS version features ---
-    tls_version_enum, is_legacy_version, rule_deprecated_version = compute_tls_version_features(version)
+    src_port_s = _pick(row, ["Source Port", "Src Port", "src_port"])
+    dst_port_s = _pick(row, ["Destination Port", "Dst Port", "dest_port"])
 
-    # --- Server side rules (JA3S) ---
-    _, server_cipher_id, _ = parse_ja3s_string(ja3s_string)
-    rule_weak_cipher = 0
-    rule_no_pfs = 0
+    def to_int_port(s: Optional[str]) -> Optional[int]:
+        if not s:
+            return None
+        try:
+            return int(float(s))
+        except Exception:
+            return None
 
-    if server_cipher_id is not None:
-        sp = classify_cipher(server_cipher_id)
-        # RULE_WEAK_CIPHER: server chọn RC4/3DES/... (cipher weak)
-        if sp["weak"]:
-            rule_weak_cipher = 1
+    src_port = to_int_port(src_port_s)
+    dst_port = to_int_port(dst_port_s)
 
-        # RULE_NO_PFS: server chọn RSA/ECDH/DH (KHÔNG DHE/ECDHE/TLS1.3) và version != TLS1.3
-        norm_version = normalize_version_string(version)
-        if sp["kx"] in {"RSA", "ECDH", "DH"} and norm_version not in {"TLS 1.3"}:
-            rule_no_pfs = 1
+    proto = _pick(row, ["Protocol", "proto"])
 
-    # RULE_CBC_ONLY: tls.version >= TLS1.2 và không có cipher AEAD
-    rule_cbc_only = 0
-    if tls_version_enum >= VERSION_ENUM.get("TLS 1.2", 3) and num_aead == 0:
-        rule_cbc_only = 1
-
-    return pd.Series(
-        {
-            "tls_version_enum": tls_version_enum,
-            "is_legacy_version": is_legacy_version,
-            "RULE_DEPRECATED_VERSION": rule_deprecated_version,
-            "num_ciphers": num_ciphers,
-            "num_strong_ciphers": num_strong,
-            "num_weak_ciphers": num_weak,
-            "weak_cipher_ratio": weak_cipher_ratio,
-            "supports_pfs": supports_pfs,
-            "prefers_pfs": prefers_pfs,
-            "pfs_cipher_ratio": pfs_cipher_ratio,
-            "num_groups": num_groups,
-            "uses_modern_group": uses_modern_group,
-            "legacy_group_ratio": legacy_group_ratio,
-            "RULE_WEAK_CIPHER": rule_weak_cipher,
-            "RULE_NO_PFS": rule_no_pfs,
-            "RULE_CBC_ONLY": rule_cbc_only,
-        }
+    return FlowMeta(
+        event_time=event_time,
+        sensor_name=sensor_name,
+        flow_id=flow_id,
+        src_ip=src_ip,
+        src_port=src_port,
+        dst_ip=dst_ip,
+        dst_port=dst_port,
+        proto=proto,
     )
 
 
-# ==========================================
-#  Runtime helper: TLS event -> feature vec
-# ==========================================
+def build_feature_dict(row_in: Dict[str, Any]) -> Dict[str, float]:
+    """Extract the exact feature set used for training from one CICFlowMeter CSV row."""
+    row = normalize_row_keys(row_in)
+    out: Dict[str, float] = {}
+    for feat in FEATURES:
+        out[feat] = _to_float(row.get(feat))
+    return out
 
-def build_feature_vector_from_event(evt: dict) -> List[float]:
-    """
-    Nhận 1 event TLS (dict đọc từ eve.json) và trả về list feature số
-    theo đúng thứ tự mà compute_feature_row sử dụng khi training.
 
-    Dùng trong python-real-time-service:
-        - log_utils.parse_tls_event(...) -> evt
-        - features = build_feature_vector_from_event(evt)
-        - scaler.transform([features]) -> đưa vào model
-    """
-    tls = evt.get("tls", {}) or {}
-
-    version = tls.get("version", "UNKNOWN")
-    ja3_obj = tls.get("ja3") or {}
-    ja3s_obj = tls.get("ja3s") or {}
-
-    row = pd.Series(
-        {
-            "version": version,
-            "ja3_string": ja3_obj.get("string", ""),
-            "ja3s_string": ja3s_obj.get("string", ""),
-        }
-    )
-
-    features_series = compute_feature_row(row)
-
-    # đảm bảo kiểu float, trả về dạng list để feed vào numpy/scaler
-    return features_series.astype("float64").tolist()
+def build_feature_vector(row_in: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, float]]:
+    feat_dict = build_feature_dict(row_in)
+    vec = np.array([feat_dict[f] for f in FEATURES], dtype=np.float32).reshape(1, -1)
+    return vec, feat_dict

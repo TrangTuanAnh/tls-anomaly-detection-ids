@@ -4,3 +4,4 @@ scikit-learn
 joblib
 tensorflow
 requests
+python-dateutil

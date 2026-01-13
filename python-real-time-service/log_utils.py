@@ -1,10 +1,19 @@
 # python-real-time-service/log_utils.py
-import json
 import os
 import time
-from typing import Iterator, Optional, Dict
+import csv
+import re
+from typing import Dict, Iterator, Optional, Tuple
 
 from config import POLL_INTERVAL
+
+_ws_re = re.compile(r"\s+")
+
+
+def _normalize_col(name: str) -> str:
+    name = (name or "").strip()
+    name = _ws_re.sub(" ", name)
+    return name
 
 
 def wait_for_file(path: str, timeout: Optional[float] = None) -> bool:
@@ -16,37 +25,76 @@ def wait_for_file(path: str, timeout: Optional[float] = None) -> bool:
     return True
 
 
-def follow_file(path: str) -> Iterator[str]:
-    """
-    Tail file giống 'tail -F': luôn chờ và đọc dòng mới.
-    """
-    if not wait_for_file(path):
-        raise FileNotFoundError(f"File không tồn tại: {path}")
+def follow_csv(path: str) -> Iterator[Dict[str, str]]:
+    """Tail a growing CSV file and yield each row as dict (normalized columns).
 
-    with open(path, "r", encoding="utf-8") as f:
-        f.seek(0, os.SEEK_END)  # nhảy tới cuối file hiện tại
+    - Reads header once.
+    - If file is rotated/truncated, it will re-open and re-read header.
+    """
+    wait_for_file(path)
 
-        while True:
-            line = f.readline()
-            if not line:
-                time.sleep(POLL_INTERVAL)
+    last_inode = None
+    header: Optional[list] = None
+    offset = 0
+
+    while True:
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            header = None
+            last_inode = None
+            offset = 0
+            time.sleep(0.5)
+            continue
+
+        inode = getattr(st, "st_ino", None)
+        size = st.st_size
+
+        rotated = (last_inode is not None and inode != last_inode) or (size < offset)
+        if rotated:
+            header = None
+            offset = 0
+
+        last_inode = inode
+
+        with open(path, "r", newline="", encoding="utf-8", errors="ignore") as f:
+            f.seek(offset)
+
+            # If we don't have header yet, read until we get it (skip empty lines)
+            if header is None:
+                while True:
+                    pos = f.tell()
+                    line = f.readline()
+                    if not line:
+                        offset = pos
+                        time.sleep(POLL_INTERVAL)
+                        break
+                    if line.strip():
+                        # parse header
+                        reader = csv.reader([line])
+                        header = [_normalize_col(h) for h in next(reader)]
+                        break
+
+            if header is None:
                 continue
-            yield line.rstrip("\r\n")
 
+            while True:
+                pos = f.tell()
+                line = f.readline()
+                if not line:
+                    offset = pos
+                    time.sleep(POLL_INTERVAL)
+                    break
+                if not line.strip():
+                    continue
 
-def parse_tls_event(line: str) -> Optional[Dict]:
-    """
-    Parse 1 dòng eve.json, chỉ trả về nếu là event TLS.
-    """
-    if not line:
-        return None
+                reader = csv.reader([line])
+                row = next(reader)
+                # tolerate mismatched length (pad/truncate)
+                if len(row) < len(header):
+                    row = row + [""] * (len(header) - len(row))
+                if len(row) > len(header):
+                    row = row[: len(header)]
 
-    try:
-        evt = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-
-    if evt.get("event_type") != "tls":
-        return None
-
-    return evt
+                d = {_normalize_col(h): v for h, v in zip(header, row)}
+                yield d

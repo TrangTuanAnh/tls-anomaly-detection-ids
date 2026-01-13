@@ -1,96 +1,56 @@
-# TLS Anomaly Detection (Suricata + Realtime ML + FastAPI + Firewall Controller)
+# Flow-based IDS/IPS (CICFlowMeter + ML)
 
-> Bản rút gọn cho đồ án **không có Front-end**: backend chỉ lưu `tls_events` và (tuỳ chọn) tạo `firewall_actions` khi bật `AUTO_BLOCK_ENABLED=true`. Các bảng/cơ chế phục vụ Web UI (alerts, users, audit...) đã được bỏ.
+**Mục tiêu mới của đồ án:** bỏ Suricata/JA3, chuyển sang **phân tích luồng (flow)** theo kiểu CIC-IDS (CICFlowMeter),
+trích xuất feature từ traffic thật trên card mạng rồi đưa vào mô hình ML của bạn (Autoencoder / IsolationForest…).
 
-## Kiến trúc (tóm tắt)
+## 1) Kiến trúc tổng thể
 
-- **Sensor stack (docker network nội bộ)**: `suricata` → `python-realtime` → `backend` → `db`
-- **Firewall host**: `firewall-controller` chạy `network_mode: host` và **polling** bảng `tls_ids.firewall_actions` để apply iptables (nếu bật auto-block).
+**(Sensor host)**
+1. `cicflowmeter` (sniff NIC) → ghi `shared/flows/flows.csv`
+2. `python-real-time-service` → tail `flows.csv` → chuẩn hoá feature → chạy ML → POST `/api/events`
+3. `backend` (FastAPI) → lưu MySQL (`flow_events`) + (tuỳ chọn) ghi `firewall_actions` nếu auto-block bật
+4. `db` (MySQL)
 
-> Suricata + backend chạy trong cùng mạng Docker nội bộ nên kênh đó không phải “điểm đau” hiện tại.  
-> **Điểm cần bảo mật**: kênh **firewall-controller ↔ MySQL (3306)** đang đi qua mạng thật và hiện đang **không TLS**.
+**(Firewall host – tuỳ chọn)**
+- `firewall-controller` poll bảng `firewall_actions` → apply iptables (giữ lại tư duy IPS)
 
----
+## 2) Feature set (flow) đưa vào ML (CHỐT)
 
-## Chạy demo nhanh (không TLS DB)
+Hệ thống **chỉ dùng đúng các feature trong `dataset_filter.py`** (danh sách có 43 item dù comment ghi “39”).
+- `python-real-time-service` luôn build **vector theo đúng thứ tự list này**.
+- Backend chỉ nhận **`features_json`** (dict) và sẽ **bỏ mọi key “rác”/ngoài danh sách**, đồng thời **fill thiếu = 0.0**.
+- API ingest **không cho phép field top-level lạ** (extra fields bị reject) để tránh “lẫn rác” vào pipeline.
 
-### 1) Sensor host
+## 3) Chạy demo bằng Docker Compose (Sensor host)
+
+### 3.1. Chuẩn bị
+- Linux host (khuyến nghị), có quyền sniff NIC (CAP_NET_RAW).
+- Chọn interface để sniff: `eth0` / `ens33` / `wlan0`…
+
+### 3.2. Cấu hình `.env`
+Các biến quan trọng:
+- `CAPTURE_INTERFACE` (NIC để CICFlowMeter sniff)
+- `REQUIRE_INGEST_HMAC`, `INGEST_HMAC_SECRET` (chống giả mạo + replay cho ingest)
+- `AE_MODEL_PATH`, `SCALER_PATH` (nếu bạn đổi tên model/scaler)
+- `AE_MODEL_SHA256`, `SCALER_SHA256` (pin hash để chống model tampering)
+
+### 3.3. Start
 ```bash
-docker compose -f docker-compose.sensor.yml up -d --build
+docker compose -f docker-compose.sensor.yml up --build
 ```
 
-### 2) Firewall host
-```bash
-docker compose -f docker-compose.firewall.yml up -d --build
-```
+Sau khi có traffic trên interface, bạn sẽ thấy:
+- `shared/flows/flows.csv` được tạo và tăng dần dòng
+- backend nhận event ở `GET /api/events`
 
+## 4) Auto-block (giữ hướng IPS)
 
----
+Trong `backend`:
+- bật `AUTO_BLOCK=true` để mỗi event bất thường sẽ ghi một dòng `firewall_actions` (BLOCK theo `src_ip`)
 
-## Bảo mật kênh Firewall Controller ↔ MySQL bằng TLS (khuyến nghị)
+Ở `firewall-controller` (chạy host firewall riêng):
+- poll bảng `firewall_actions` và apply iptables (giữ logic cũ của đồ án)
 
-### Option A: Dùng script (nhanh nhất)
-
-Trên **sensor host** (trong repo root):
-
-```bash
-chmod +x scripts/gen-mysql-tls.sh
-./scripts/gen-mysql-tls.sh --sensor-ip SENSOR_IP_HERE --enable-sensor-compose
-docker compose -f docker-compose.sensor.yml up -d --force-recreate db
-```
-
-Nếu bạn muốn script **tạo luôn DB user** riêng cho firewall-controller (bắt buộc X509, không lưu password vào repo):
-
-```bash
-./scripts/gen-mysql-tls.sh --sensor-ip SENSOR_IP_HERE --enable-sensor-compose --create-fw-user
-```
-
-Sau đó copy bundle sang **firewall host**:
-
-```bash
-scp -r pki/mysql/fw-bundle <firewall-host>:/path/to/project/pki/mysql/
-```
-
-Trên **firewall host**, chỉnh `docker-compose.firewall.yml`:
-
-- `DB_HOST: "SENSOR_IP_HERE"` → IP của sensor host
-- Mount cert bundle:
-  - `./pki/mysql/fw-bundle:/pki/mysql:ro`
-- Bật TLS env (bỏ comment):
-  - `DB_TLS_ENABLED: "true"`
-  - `DB_SSL_CA: "/pki/mysql/ca.pem"`
-  - `DB_SSL_CERT: "/pki/mysql/fw-client.pem"`
-  - `DB_SSL_KEY: "/pki/mysql/fw-client.key"`
-- Set user/pass (khuyến nghị đặt trong `.env` ở firewall host):
-  - `FW_DB_USER=fw_user`
-  - `FW_DB_PASSWORD=...`
-  - `FW_DB_NAME=tls_ids` (nếu khác)
-
-Restart firewall-controller:
-
-```bash
-docker compose -f docker-compose.firewall.yml up -d --force-recreate
-```
-
-### Option B: Làm thủ công (tóm tắt)
-
-1) Tạo CA + server cert (có SAN chứa `SENSOR_IP`) + client cert cho firewall  
-2) Mount vào MySQL container (`./pki/mysql` và `./mysql-conf/ssl.cnf`)  
-3) Tạo DB user `fw_user` và `ALTER USER ... REQUIRE X509`  
-4) Trên firewall host: mount CA+client cert/key và bật `DB_TLS_ENABLED=true`
-
----
-
-## Verify (từ firewall host)
-
-Nếu có mysql client trên firewall host:
-
-```bash
-mysql --host=SENSOR_IP_HERE --user=fw_user --password='FW_DB_PASSWORD_HERE'   --ssl-mode=VERIFY_CA   --ssl-ca=ca.pem --ssl-cert=fw-client.pem --ssl-key=fw-client.key   -e "status"
-```
-
----
-
-## Ghi chú “fail-closed”
-
-- Khi `DB_TLS_ENABLED=true` mà thiếu `DB_SSL_CA/DB_SSL_CERT/DB_SSL_KEY` → firewall-controller sẽ **exit** (không tự fallback plaintext).
+## 5) Ghi chú quan trọng
+- CICFlowMeter trong repo này đang dùng bản **python package `cicflowmeter`** (CICFlowMeter-like).
+  Nếu bạn muốn dùng bản Java jar gốc, bạn có thể thay container `cicflowmeter` bằng image jar-based (xem README của dự án docker hoá CICFlowMeter).
