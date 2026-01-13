@@ -1,80 +1,60 @@
-# Đồ án IDS/IPS dựa trên phân tích luồng (Flow) với CICFlowMeter + ML
+# Tóm tắt kiến trúc đồ án: Flow-based IDS/IPS (CICFlowMeter + ML + FastAPI + MySQL)
 
-## 1. Thay đổi hướng so với phiên bản Suricata/JA3
-Phiên bản cũ dựa trên Suricata đọc log `eve.json` và trích xuất đặc trưng TLS/JA3.
-Phiên bản mới chuyển hoàn toàn sang **phân tích luồng (flow)** theo phong cách CIC-IDS:
+## 1) Sơ đồ tổng quan (2 chế độ chạy)
 
-- **Sniff trực tiếp NIC** → CICFlowMeter (hoặc CICFlowMeter-like) sinh flow + feature
-- **python-real-time-service** đọc CSV flow → chuẩn hoá feature → chạy ML → gửi backend
-- **backend + MySQL** lưu log & (tuỳ chọn) phát lệnh block sang firewall-controller
+### 1.1. Sensor host (chạy demo “tất cả trong 1 máy”)
+- `cicflowmeter` (sniff NIC) → ghi `./shared/flows/flows.csv`
+- `python-real-time-service` → tail CSV → trích 43 feature → scale → Autoencoder/IsolationForest → POST event → `backend`
+- `backend` (FastAPI) → validate + clean feature → lưu DB (flow_events) → (tuỳ chọn) ghi firewall_actions khi anomaly
+- `db` (MySQL) → lưu `flow_events`, `firewall_actions`, `request_nonces`
 
-Tư duy “bảo mật hệ thống” vẫn giữ: ký ingest chống giả mạo + replay, kiểm tra toàn vẹn model, TLS MySQL khi firewall-controller connect qua mạng thật, và cơ chế IPS qua iptables.
-
----
-
-## 2. Kiến trúc hệ thống (hướng Flow)
-
-### 2.1. Sensor host (máy giám sát)
-- **cicflowmeter-sniffer**: sniff interface (eth0/ens33/…) và ghi `shared/flows/flows.csv`
-- **python-real-time-service**:
-  - tail CSV
-  - trích 43 feature (theo danh sách training)
-  - chạy Autoencoder (reconstruction error) + (tuỳ chọn) IsolationForest
-  - POST `/api/events` lên backend (kèm chữ ký HMAC nếu bật)
-- **backend (FastAPI)**: nhận event, lưu DB, ghi `firewall_actions` nếu auto-block bật
-- **db (MySQL)**: bảng `flow_events`, `firewall_actions`, `request_nonces`
-
-### 2.2. Firewall host (máy tường lửa – tuỳ chọn)
-- **firewall-controller**: poll `firewall_actions` và apply iptables (BLOCK/UNBLOCK).
-- Có kiểm tra integrity đơn giản: nếu rule bị xoá thủ công, controller có thể thêm lại.
+### 1.2. Firewall host (tuỳ chọn, giữ tư duy IPS)
+- `firewall-controller` (poll MySQL bảng `firewall_actions`) → apply iptables **BLOCK/UNBLOCK** theo `src_ip`
 
 ---
 
-## 3. Dòng dữ liệu (Data pipeline)
-1. NIC → `cicflowmeter` → `flows.csv`
-2. `python-real-time-service` đọc dòng mới → parse metadata (src/dst/proto/time)
-3. Tách feature vector `X` (đúng thứ tự training)
-4. Scale → Autoencoder → `ae_error`
-5. (Optional) IsolationForest → `iso_score`
-6. Kết luận bất thường nếu `ae_error > AE_THRESHOLD` hoặc `iso_score < ISO_THRESHOLD`
-7. Gửi payload lên backend, backend lưu DB; nếu `AUTO_BLOCK=true` thì tạo action BLOCK
+## 2) Layout repo (runtime components theo thư mục)
+- `docker-compose.sensor.yml` — compose cho **sensor host**
+- `docker-compose.firewall.yml` — compose cho **firewall host**
+- `mysql-init/schema.sql` — schema DB (3 bảng)
+- `cicflowmeter/` — container sniff NIC, xuất CSV
+  - `Dockerfile` cài package `cicflowmeter`
+  - `run.sh` chạy: `cicflowmeter -i <iface> -c <csv>`
+- `python-real-time-service/` — service realtime: CSV → feature → ML → gửi backend
+  - `main.py`, `feature_extractor.py`, `log_utils.py`, `config.py`
+  - `trained_models/` — model/scaler (read-only mount)
+- `backend/` — FastAPI + SQLAlchemy lưu event & phát action
+  - `main.py` (API + HMAC verify + feature clean)
+- `firewall-controller/` — poll DB và apply iptables
+  - `main.py`
+- `scripts/gen-mysql-tls.sh` — sinh CA + cert TLS cho MySQL + bundle client cho firewall host (tuỳ chọn)
 
 ---
 
-## 4. Feature set dùng cho ML
-Danh sách feature được dùng trong code ở:
-- `python-real-time-service/feature_extractor.py`
+## 3) Data pipeline chi tiết (từ packet → flow → ML → DB → IPS)
 
-**Lưu ý:** file lọc dataset có comment “39 features” nhưng danh sách thực tế hiện tại là **43** (có thêm TCP flags).  
-Mô hình training phải dùng đúng danh sách + đúng thứ tự này để inference khớp.
+### 3.1. Bước 1: Sniff & sinh flow CSV
+**Container**: `cicflowmeter-sniffer`  
+**Network**: `network_mode: "host"` (để sniff NIC thật)  
+**Caps**: `NET_ADMIN`, `NET_RAW`  
+**Command** (bên trong run.sh):
+~~~sh
+cicflowmeter -i "$CAPTURE_INTERFACE" -c "/shared/flows/flows.csv"
+~~~
+**Output contract**: file CSV grow dần theo thời gian: `./shared/flows/flows.csv` (mount vào các container khác).
 
----
+### 3.2. Bước 2: Tail CSV (chịu được rotate/truncate)
+**Module**: `python-real-time-service/log_utils.py: follow_csv()`  
+- Đọc header 1 lần, normalize tên cột (gộp whitespace).
+- Nếu file bị rotate/truncate → reset offset + đọc lại header.
+- Poll theo `POLL_INTERVAL` (mặc định 0.2s).
 
-## 5. Bảo mật & hardening (giữ lại)
-- **HMAC + timestamp + nonce** cho ingest: chống giả mạo + replay khi gửi event.
-- **Model integrity pinning (SHA-256)**: phát hiện thay thế file model/scaler trong container.
-- **MySQL TLS (tuỳ chọn)**: nếu firewall-controller connect DB qua mạng thật, bật TLS để chống MITM.
-- **IPS**: rule iptables do firewall-controller áp dụng theo `firewall_actions`.
-
----
-
-## 6. Triển khai
-### 6.1. Sensor host
-```bash
-docker compose -f docker-compose.sensor.yml up --build
-```
-
-### 6.2. Firewall host (tuỳ chọn)
-- Sửa `docker-compose.firewall.yml`: `DB_HOST` trỏ về IP sensor host
-- Chạy:
-```bash
-docker compose -f docker-compose.firewall.yml up --build
-```
-
----
-
-## 7. Đánh giá / Demo
-- Tạo traffic bình thường + traffic bất thường (scan, flood, …) để quan sát:
-  - dòng flow được sinh ra
-  - backend lưu `flow_events`
-  - nếu bật `AUTO_BLOCK=true` thì `firewall_actions` tăng và iptables có rule tương ứng
+### 3.3. Bước 3: Trích metadata flow + vector feature “khóa cứng”
+**Module**: `python-real-time-service/feature_extractor.py`
+- `extract_flow_meta()` cố gắng lấy:
+  - Timestamp từ: `Timestamp | Flow Start Time | Start Time | time | Time`
+  - `Flow ID` (nếu có)
+  - `Source IP/Port`, `Destination IP/Port`, `Protocol`
+- `build_feature_vector()`:
+  - luôn build **vector 1x43** theo đúng thứ tự list `FEATURES`
+  - mọi giá trị non-n
