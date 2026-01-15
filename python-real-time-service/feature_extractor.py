@@ -13,67 +13,65 @@ from dateutil import parser as dtparser
 _ws_re = re.compile(r"\s+")
 
 
-# NOTE:
-# dataset_filter.py says "39 features" but the actual list currently has 43 items.
-# We follow the list content as the source of truth.
+"""Feature extraction for CICFlowMeter(-like) CSV.
+
+This project is **locked** to a strict feature contract (the same columns used in training).
+We keep canonical CIC-style names, but tolerate common header variants from different
+`cicflowmeter` / CICFlowMeter builds via aliases.
+"""
+
+# Strict feature contract (34 features) — MUST match training order
 FEATURES: List[str] = [
-    # Flow & volume
-    "Flow Duration",
-    "Total Fwd Packets",
-    "Total Backward Packets",
-    "Total Length of Fwd Packets",
-    "Total Length of Bwd Packets",
-    "Flow Bytes/s",
-    "Flow Packets/s",
-
-    # Packet length (forward)
-    "Fwd Packet Length Min",
-    "Fwd Packet Length Max",
-    "Fwd Packet Length Mean",
-    "Fwd Packet Length Std",
-
-    # Packet length (backward)
-    "Bwd Packet Length Min",
-    "Bwd Packet Length Max",
-    "Bwd Packet Length Mean",
-    "Bwd Packet Length Std",
-
-    # Packet length (global)
-    "Min Packet Length",
-    "Max Packet Length",
-    "Packet Length Mean",
     "Packet Length Std",
+    "Total Length of Bwd Packets",
+    "Subflow Bwd Bytes",
+    "Destination Port",
     "Packet Length Variance",
-    "Average Packet Size",
-    "Avg Fwd Segment Size",
+    "Bwd Packet Length Mean",
     "Avg Bwd Segment Size",
-
-    # Timing (IAT)
-    "Flow IAT Mean",
-    "Flow IAT Std",
+    "Bwd Packet Length Max",
+    "Init_Win_bytes_backward",
+    "Total Length of Fwd Packets",
+    "Subflow Fwd Bytes",
+    "Init_Win_bytes_forward",
+    "Average Packet Size",
+    "Packet Length Mean",
+    "Max Packet Length",
+    "Fwd Packet Length Max",
     "Flow IAT Max",
-    "Flow IAT Min",
-    "Fwd IAT Mean",
-    "Fwd IAT Std",
+    "Bwd Header Length",
+    "Flow Duration",
     "Fwd IAT Max",
-    "Fwd IAT Min",
-    "Bwd IAT Mean",
-    "Bwd IAT Std",
-    "Bwd IAT Max",
-    "Bwd IAT Min",
-
-    # Direction
+    "Fwd Header Length",
+    "Fwd IAT Total",
+    "Fwd IAT Mean",
+    "Flow IAT Mean",
+    "Flow Bytes/s",
+    "Bwd Packet Length Std",
+    "Subflow Bwd Packets",
+    "Total Backward Packets",
+    "Fwd Packet Length Mean",
+    "Avg Fwd Segment Size",
+    "Bwd Packet Length Min",
+    "Flow Packets/s",
     "Fwd Packets/s",
     "Bwd Packets/s",
-    "Down/Up Ratio",
-
-    # TCP flags (core)
-    "FIN Flag Count",
-    "SYN Flag Count",
-    "RST Flag Count",
-    "PSH Flag Count",
-    "ACK Flag Count",
 ]
+
+# Header aliases observed across CICFlowMeter(-like) tools.
+# Keys and values are canonical CIC names (same as FEATURES) and acceptable alternates.
+FEATURE_ALIASES: Dict[str, List[str]] = {
+    "Destination Port": ["Dst Port", "Dest Port"],
+    "Total Backward Packets": ["Total Bwd Packets", "Tot Bwd Pkts"],
+    "Total Length of Fwd Packets": ["Total Length of Forward Packets", "TotLen Fwd Pkts"],
+    "Total Length of Bwd Packets": ["Total Length of Backward Packets", "TotLen Bwd Pkts"],
+    "Flow Bytes/s": ["FlowBytes/s"],
+    "Flow Packets/s": ["FlowPackets/s"],
+    "Fwd Packets/s": ["FwdPackets/s"],
+    "Bwd Packets/s": ["BwdPackets/s"],
+    "Init_Win_bytes_forward": ["Init Win bytes forward"],
+    "Init_Win_bytes_backward": ["Init Win bytes backward"],
+}
 
 
 def _norm_key(k: str) -> str:
@@ -121,9 +119,18 @@ class FlowMeta:
 
 
 def _pick(row: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    """Pick first non-empty value among candidate keys.
+
+    Row keys are already whitespace-normalized, but we also do case-insensitive lookup.
+    """
+    row_l = {str(k).lower(): v for k, v in row.items()}
     for k in keys:
-        if k in row and str(row[k]).strip() != "":
-            return str(row[k]).strip()
+        kk = _norm_key(k)
+        if kk in row and str(row[kk]).strip() != "":
+            return str(row[kk]).strip()
+        v = row_l.get(kk.lower())
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
     return None
 
 
@@ -189,9 +196,21 @@ def extract_flow_meta(row_in: Dict[str, Any], sensor_name: Optional[str] = None)
 def build_feature_dict(row_in: Dict[str, Any]) -> Dict[str, float]:
     """Extract the exact feature set used for training from one CICFlowMeter CSV row."""
     row = normalize_row_keys(row_in)
+    row_l = {str(k).lower(): v for k, v in row.items()}
     out: Dict[str, float] = {}
     for feat in FEATURES:
-        out[feat] = _to_float(row.get(feat))
+        candidates = [feat] + FEATURE_ALIASES.get(feat, [])
+        raw = None
+        for c in candidates:
+            ck = _norm_key(c)
+            if ck in row and str(row[ck]).strip() != "":
+                raw = row[ck]
+                break
+            v = row_l.get(ck.lower())
+            if v is not None and str(v).strip() != "":
+                raw = v
+                break
+        out[feat] = _to_float(raw)
     return out
 
 

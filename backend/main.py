@@ -41,65 +41,43 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 # ========================
 # Feature contract
 # ========================
-# The project is **locked** to this exact CIC-style feature set (kept in dataset_filter.py).
-# NOTE: The comment in dataset_filter.py says "39", but the actual list contains 43 items.
+# The project is **locked** to this exact CIC-style feature set.
+# MUST match the feature order used in training and in `python-real-time-service/feature_extractor.py`.
 FEATURE_NAMES: List[str] = [
-    # Flow & volume
-    "Flow Duration",
-    "Total Fwd Packets",
-    "Total Backward Packets",
-    "Total Length of Fwd Packets",
-    "Total Length of Bwd Packets",
-    "Flow Bytes/s",
-    "Flow Packets/s",
-
-    # Packet length (forward)
-    "Fwd Packet Length Min",
-    "Fwd Packet Length Max",
-    "Fwd Packet Length Mean",
-    "Fwd Packet Length Std",
-
-    # Packet length (backward)
-    "Bwd Packet Length Min",
-    "Bwd Packet Length Max",
-    "Bwd Packet Length Mean",
-    "Bwd Packet Length Std",
-
-    # Packet length (global)
-    "Min Packet Length",
-    "Max Packet Length",
-    "Packet Length Mean",
     "Packet Length Std",
+    "Total Length of Bwd Packets",
+    "Subflow Bwd Bytes",
+    "Destination Port",
     "Packet Length Variance",
-    "Average Packet Size",
-    "Avg Fwd Segment Size",
+    "Bwd Packet Length Mean",
     "Avg Bwd Segment Size",
-
-    # Timing (IAT)
-    "Flow IAT Mean",
-    "Flow IAT Std",
+    "Bwd Packet Length Max",
+    "Init_Win_bytes_backward",
+    "Total Length of Fwd Packets",
+    "Subflow Fwd Bytes",
+    "Init_Win_bytes_forward",
+    "Average Packet Size",
+    "Packet Length Mean",
+    "Max Packet Length",
+    "Fwd Packet Length Max",
     "Flow IAT Max",
-    "Flow IAT Min",
-    "Fwd IAT Mean",
-    "Fwd IAT Std",
+    "Bwd Header Length",
+    "Flow Duration",
     "Fwd IAT Max",
-    "Fwd IAT Min",
-    "Bwd IAT Mean",
-    "Bwd IAT Std",
-    "Bwd IAT Max",
-    "Bwd IAT Min",
-
-    # Direction
+    "Fwd Header Length",
+    "Fwd IAT Total",
+    "Fwd IAT Mean",
+    "Flow IAT Mean",
+    "Flow Bytes/s",
+    "Bwd Packet Length Std",
+    "Subflow Bwd Packets",
+    "Total Backward Packets",
+    "Fwd Packet Length Mean",
+    "Avg Fwd Segment Size",
+    "Bwd Packet Length Min",
+    "Flow Packets/s",
     "Fwd Packets/s",
     "Bwd Packets/s",
-    "Down/Up Ratio",
-
-    # TCP flags (core)
-    "FIN Flag Count",
-    "SYN Flag Count",
-    "RST Flag Count",
-    "PSH Flag Count",
-    "ACK Flag Count",
 ]
 
 

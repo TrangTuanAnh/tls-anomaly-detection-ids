@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 import json
 import hmac
@@ -28,7 +29,56 @@ from config import (
     SCALER_SHA256,
 )
 from log_utils import follow_csv
-from feature_extractor import build_feature_vector, extract_flow_meta
+from feature_extractor import FEATURES, build_feature_vector, extract_flow_meta
+
+
+def _infer_ae_input_dim(ae_model) -> Optional[int]:
+    """Best-effort infer autoencoder expected input dimension."""
+    try:
+        shape = getattr(ae_model, "input_shape", None)
+        if shape and isinstance(shape, (tuple, list)) and len(shape) >= 2:
+            dim = shape[-1]
+            return int(dim) if dim is not None else None
+    except Exception:
+        pass
+
+    try:
+        # Some Keras models expose inputs[...] shapes instead
+        t = ae_model.inputs[0]
+        dim = getattr(t, "shape", None)[-1]
+        return int(dim) if dim is not None else None
+    except Exception:
+        return None
+
+
+def _validate_feature_contract(scaler, ae_model) -> None:
+    expected_n = len(FEATURES)
+
+    # Scaler dimension checks
+    n_in = getattr(scaler, "n_features_in_", None)
+    if n_in is not None and int(n_in) != expected_n:
+        raise RuntimeError(
+            f"Scaler feature count mismatch: expected={expected_n} got={int(n_in)}. "
+            f"Make sure scaler/model are trained on the exact FEATURES list in feature_extractor.py"
+        )
+
+    # If scaler has feature names, enforce exact order when available
+    names = getattr(scaler, "feature_names_in_", None)
+    if names is not None:
+        names = list(names)
+        if names != FEATURES:
+            raise RuntimeError(
+                "Scaler feature_names_in_ do not match required feature order. "
+                "Re-train scaler with the same ordered FEATURES list in feature_extractor.py"
+            )
+
+    # Autoencoder input dim checks
+    ae_dim = _infer_ae_input_dim(ae_model)
+    if ae_dim is not None and int(ae_dim) != expected_n:
+        raise RuntimeError(
+            f"Autoencoder input dimension mismatch: expected={expected_n} got={int(ae_dim)}. "
+            f"Provide an autoencoder trained on the exact FEATURES list in feature_extractor.py"
+        )
 
 
 def _sha256_file(path: str) -> str:
@@ -47,6 +97,35 @@ def _check_integrity(path: str, expected_sha256: str, label: str) -> None:
         raise RuntimeError(f"{label} integrity check failed: expected={expected_sha256} got={got}")
 
 
+def _joblib_load_compat(path: str):
+    """Load joblib artifacts with a small compatibility shim.
+
+    Some pickles created with NumPy 2.x reference `numpy._core.*`. If the runtime happens
+    to use an older NumPy (1.x), joblib.load can fail with `ModuleNotFoundError: numpy._core`.
+
+    We do a best-effort alias so the same artifact can still be loaded.
+    """
+    try:
+        return joblib.load(path)
+    except (ModuleNotFoundError, ImportError) as e:
+        msg = str(e)
+        if "numpy._core" not in msg:
+            raise
+
+        import types
+        import numpy.core.multiarray as _ma
+        import numpy.core._multiarray_umath as _mu
+
+        m = types.ModuleType("numpy._core")
+        m.__path__ = []
+        m.multiarray = _ma
+        m._multiarray_umath = _mu
+        sys.modules.setdefault("numpy._core", m)
+        sys.modules.setdefault("numpy._core.multiarray", _ma)
+        sys.modules.setdefault("numpy._core._multiarray_umath", _mu)
+        return joblib.load(path)
+
+
 def load_models():
     """Load scaler + autoencoder (+ optional isolation forest)."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -54,16 +133,6 @@ def load_models():
 
     scaler_path = os.getenv("SCALER_PATH", "") or os.path.join(models_dir, "scaler.pkl")
     ae_path = os.getenv("AE_MODEL_PATH", "") or os.path.join(models_dir, "autoencoder.h5")
-
-    # Backward compat: if repo still has old names
-    if not os.path.isfile(ae_path):
-        cand = os.path.join(models_dir, "autoencoder_tls.h5")
-        if os.path.isfile(cand):
-            ae_path = cand
-    if not os.path.isfile(scaler_path):
-        cand = os.path.join(models_dir, "scaler_tls.pkl")
-        if os.path.isfile(cand):
-            scaler_path = cand
 
     iso_path = os.getenv("ISO_MODEL_PATH", "") or os.path.join(models_dir, "isolation_forest.pkl")
 
@@ -75,12 +144,15 @@ def load_models():
     _check_integrity(ae_path, AE_MODEL_SHA256, "Autoencoder")
     _check_integrity(scaler_path, SCALER_SHA256, "Scaler")
 
-    scaler = joblib.load(scaler_path)
+    scaler = _joblib_load_compat(scaler_path)
     ae_model = load_model(ae_path, compile=False)
+
+    # Ensure model + scaler are trained for the exact CICFlowMeter feature contract
+    _validate_feature_contract(scaler, ae_model)
 
     iso_model = None
     if os.path.isfile(iso_path):
-        iso_model = joblib.load(iso_path)
+        iso_model = _joblib_load_compat(iso_path)
 
     return scaler, ae_model, iso_model
 
