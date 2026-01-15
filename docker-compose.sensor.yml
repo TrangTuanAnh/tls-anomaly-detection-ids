@@ -69,6 +69,8 @@ services:
     environment:
       BACKEND_URL: http://backend:8000
       FLOW_CSV_PATH: /shared/flows/flows.csv
+      AE_MODEL_PATH: /app/trained_models/mlp.h5
+      SCALER_PATH: /app/trained_models/scaler.pkl
       AE_THRESHOLD: ${AE_THRESHOLD:-0.05}
       ISO_THRESHOLD: ${ISO_THRESHOLD:--0.1}
       REQUIRE_INGEST_HMAC: ${REQUIRE_INGEST_HMAC:-false}
