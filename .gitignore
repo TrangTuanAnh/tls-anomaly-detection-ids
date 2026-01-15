@@ -7,7 +7,7 @@ pki/
 
 # runtime data
 mysql-data/
-shared/logs/
+shared/
 __pycache__/
 *.pyc
 node_modules/

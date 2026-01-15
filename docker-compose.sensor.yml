@@ -49,7 +49,7 @@ services:
       - NET_ADMIN
       - NET_RAW
     # easiest for sniffing in many environments:
-    # privileged: true
+    privileged: true
     env_file:
       - .env
     environment:
