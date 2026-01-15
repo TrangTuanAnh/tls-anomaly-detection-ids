@@ -26,11 +26,7 @@ def wait_for_file(path: str, timeout: Optional[float] = None) -> bool:
 
 
 def follow_csv(path: str) -> Iterator[Dict[str, str]]:
-    """Tail a growing CSV file and yield each row as dict (normalized columns).
 
-    - Reads header once.
-    - If file is rotated/truncated, it will re-open and re-read header.
-    """
     wait_for_file(path)
 
     last_inode = None
@@ -60,7 +56,6 @@ def follow_csv(path: str) -> Iterator[Dict[str, str]]:
         with open(path, "r", newline="", encoding="utf-8", errors="ignore") as f:
             f.seek(offset)
 
-            # If we don't have header yet, read until we get it (skip empty lines)
             if header is None:
                 while True:
                     pos = f.tell()
@@ -70,7 +65,7 @@ def follow_csv(path: str) -> Iterator[Dict[str, str]]:
                         time.sleep(POLL_INTERVAL)
                         break
                     if line.strip():
-                        # parse header
+
                         reader = csv.reader([line])
                         header = [_normalize_col(h) for h in next(reader)]
                         break
@@ -90,7 +85,6 @@ def follow_csv(path: str) -> Iterator[Dict[str, str]]:
 
                 reader = csv.reader([line])
                 row = next(reader)
-                # tolerate mismatched length (pad/truncate)
                 if len(row) < len(header):
                     row = row + [""] * (len(header) - len(row))
                 if len(row) > len(header):

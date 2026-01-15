@@ -1,14 +1,11 @@
 # Đồ án IDS/IPS dựa trên phân tích luồng (Flow) với CICFlowMeter + ML
-
 ## 1. Thay đổi hướng so với phiên bản Suricata/JA3
 Phiên bản cũ dựa trên Suricata đọc log `eve.json` và trích xuất đặc trưng TLS/JA3.
 Phiên bản mới chuyển hoàn toàn sang **phân tích luồng (flow)** theo phong cách CIC-IDS:
 
-- **Sniff trực tiếp NIC** → CICFlowMeter (hoặc CICFlowMeter-like) sinh flow + feature
-- **python-real-time-service** đọc CSV flow → chuẩn hoá feature → chạy ML → gửi backend
+- **Sniff trực tiếp NIC** -> CICFlowMeter (hoặc CICFlowMeter-like) sinh flow + feature
+- **python-real-time-service** đọc CSV flow -> chuẩn hoá feature -> chạy ML -> gửi backend
 - **backend + MySQL** lưu log & (tuỳ chọn) phát lệnh block sang firewall-controller
-
-Tư duy “bảo mật hệ thống” vẫn giữ: ký ingest chống giả mạo + replay, kiểm tra toàn vẹn model, TLS MySQL khi firewall-controller connect qua mạng thật, và cơ chế IPS qua iptables.
 
 ---
 
@@ -31,11 +28,11 @@ Tư duy “bảo mật hệ thống” vẫn giữ: ký ingest chống giả m�
 ---
 
 ## 3. Dòng dữ liệu (Data pipeline)
-1. NIC → `cicflowmeter` → `flows.csv`
-2. `python-real-time-service` đọc dòng mới → parse metadata (src/dst/proto/time)
+1. NIC -> `cicflowmeter` -> `flows.csv`
+2. `python-real-time-service` đọc dòng mới -> parse metadata (src/dst/proto/time)
 3. Tách feature vector `X` (đúng thứ tự training)
-4. Scale → Autoencoder → `ae_error`
-5. (Optional) IsolationForest → `iso_score`
+4. Scale -> Autoencoder -> `ae_error`
+5. (Optional) IsolationForest -> `iso_score`
 6. Kết luận bất thường nếu `ae_error > AE_THRESHOLD` hoặc `iso_score < ISO_THRESHOLD`
 7. Gửi payload lên backend, backend lưu DB; nếu `AUTO_BLOCK=true` thì tạo action BLOCK
 
@@ -45,8 +42,6 @@ Tư duy “bảo mật hệ thống” vẫn giữ: ký ingest chống giả m�
 Danh sách feature được dùng trong code ở:
 - `python-real-time-service/feature_extractor.py`
 - `backend/main.py` (backend sẽ drop key thừa, fill key thiếu = 0.0)
-
-**Lưu ý:** mô hình training (và scaler) phải dùng **đúng 34 feature** và **đúng thứ tự** như trong `feature_extractor.py` để inference khớp.
 
 ---
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-IFACE="${CAPTURE_INTERFACE:-eth0}"
+IFACE="${CAPTURE_INTERFACE:-wlo1}"
 OUT="${FLOW_CSV_PATH:-/shared/flows/flows.csv}"
 
 mkdir -p "$(dirname "$OUT")"
