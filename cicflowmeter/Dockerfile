@@ -13,7 +13,7 @@ WORKDIR /app
 
 # Install cicflowmeter (CICFlowMeter-like CLI)
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir cicflowmeter
+    && pip install --no-cache-dir cicflowmeter==0.4.2
 
 COPY run.sh /app/run.sh
 RUN chmod +x /app/run.sh
