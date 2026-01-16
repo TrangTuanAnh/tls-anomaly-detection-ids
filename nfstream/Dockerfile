@@ -1,9 +1,8 @@
-FROM python:3.12-slim
-
+FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 
-# libpcap + build tools (một số bản cicflowmeter cần compile phụ thuộc)
+# NFStream needs libpcap (capture) and build deps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcap-dev \
     build-essential \
@@ -11,11 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install cicflowmeter (CICFlowMeter-like CLI)
+# Keep dependencies minimal and explicit.
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir cicflowmeter==0.4.2
+    && pip install --no-cache-dir -r /app/requirements.txt
 
 COPY run.sh /app/run.sh
+COPY nfstream_sniffer.py /app/nfstream_sniffer.py
+
 RUN chmod +x /app/run.sh
 
 VOLUME ["/shared/flows"]

@@ -1,6 +1,5 @@
 # python-real-time-service/main.py
 from __future__ import annotations
-from http_ingest import start_http_ingest
 
 import os
 import sys
@@ -11,12 +10,16 @@ import hashlib
 import secrets
 import threading
 import queue
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Union
 
 import numpy as np
 import joblib
 import requests
+import pandas as pd
 from tensorflow.keras.models import load_model
+
+from fastapi import FastAPI, Body, HTTPException
+import uvicorn
 
 from config import (
     FLOW_CSV_PATH,
@@ -28,10 +31,20 @@ from config import (
     INGEST_HMAC_MAX_AGE_SEC,
     AE_MODEL_SHA256,
     SCALER_SHA256,
+    INGEST_MODE,
+    LISTEN_HOST,
+    LISTEN_PORT,
 )
 from log_utils import follow_csv
 from feature_extractor import FEATURES, build_feature_vector, extract_flow_meta
 
+
+app = FastAPI(title="Flow Realtime Service", version="1.1")
+
+
+# -----------------
+# Model utilities
+# -----------------
 
 def _infer_ae_input_dim(ae_model) -> Optional[int]:
     """Best-effort infer autoencoder expected input dimension."""
@@ -44,7 +57,6 @@ def _infer_ae_input_dim(ae_model) -> Optional[int]:
         pass
 
     try:
-        # Some Keras models expose inputs[...] shapes instead
         t = ae_model.inputs[0]
         dim = getattr(t, "shape", None)[-1]
         return int(dim) if dim is not None else None
@@ -55,7 +67,6 @@ def _infer_ae_input_dim(ae_model) -> Optional[int]:
 def _validate_feature_contract(scaler, ae_model) -> None:
     expected_n = len(FEATURES)
 
-    # Scaler dimension checks
     n_in = getattr(scaler, "n_features_in_", None)
     if n_in is not None and int(n_in) != expected_n:
         raise RuntimeError(
@@ -63,7 +74,6 @@ def _validate_feature_contract(scaler, ae_model) -> None:
             f"Make sure scaler/model are trained on the exact FEATURES list in feature_extractor.py"
         )
 
-    # If scaler has feature names, enforce exact order when available
     names = getattr(scaler, "feature_names_in_", None)
     if names is not None:
         names = list(names)
@@ -73,7 +83,6 @@ def _validate_feature_contract(scaler, ae_model) -> None:
                 "Re-train scaler with the same ordered FEATURES list in feature_extractor.py"
             )
 
-    # Autoencoder input dim checks
     ae_dim = _infer_ae_input_dim(ae_model)
     if ae_dim is not None and int(ae_dim) != expected_n:
         raise RuntimeError(
@@ -99,13 +108,7 @@ def _check_integrity(path: str, expected_sha256: str, label: str) -> None:
 
 
 def _joblib_load_compat(path: str):
-    """Load joblib artifacts with a small compatibility shim.
-
-    Some pickles created with NumPy 2.x reference `numpy._core.*`. If the runtime happens
-    to use an older NumPy (1.x), joblib.load can fail with `ModuleNotFoundError: numpy._core`.
-
-    We do a best-effort alias so the same artifact can still be loaded.
-    """
+    """Load joblib artifacts with a small compatibility shim."""
     try:
         return joblib.load(path)
     except (ModuleNotFoundError, ImportError) as e:
@@ -134,7 +137,6 @@ def load_models():
 
     scaler_path = os.getenv("SCALER_PATH", "") or os.path.join(models_dir, "scaler.pkl")
     ae_path = os.getenv("AE_MODEL_PATH", "") or os.path.join(models_dir, "autoencoder.h5")
-
     iso_path = os.getenv("ISO_MODEL_PATH", "") or os.path.join(models_dir, "isolation_forest.pkl")
 
     if not os.path.isfile(scaler_path):
@@ -148,7 +150,6 @@ def load_models():
     scaler = _joblib_load_compat(scaler_path)
     ae_model = load_model(ae_path, compile=False)
 
-    # Ensure model + scaler are trained for the exact CICFlowMeter feature contract
     _validate_feature_contract(scaler, ae_model)
 
     iso_model = None
@@ -160,9 +161,16 @@ def load_models():
 
 def predict_anomaly(x: np.ndarray, scaler, ae_model, iso_model=None) -> Dict[str, Any]:
     """Return anomaly decision and scores."""
-    x_scaled = scaler.transform(x)
+    # If the scaler was fitted with feature names (pandas DataFrame during training),
+    # passing a raw ndarray will trigger a warning and makes it easier to accidentally
+    # mismatch column order. Convert to a DataFrame with the strict FEATURES order.
+    try:
+        x_df = pd.DataFrame(x, columns=FEATURES)
+        x_scaled = scaler.transform(x_df)
+    except Exception:
+        # Fallback (should rarely happen)
+        x_scaled = scaler.transform(x)
 
-    # AE reconstruction error (MSE per sample)
     recon = ae_model.predict(x_scaled, verbose=0)
     err = np.mean((x_scaled - recon) ** 2, axis=1)[0]
     ae_anom = float(err) > AE_THRESHOLD
@@ -171,7 +179,6 @@ def predict_anomaly(x: np.ndarray, scaler, ae_model, iso_model=None) -> Dict[str
     iso_anom = None
     if iso_model is not None:
         try:
-            # decision_function: higher = more normal (sklearn convention)
             iso_score = float(iso_model.decision_function(x_scaled)[0])
             iso_anom = iso_score < ISO_THRESHOLD
         except Exception:
@@ -243,6 +250,16 @@ def send_event_to_backend(payload: Dict[str, Any]) -> None:
         print(f"[RT][WARN] Cannot send event to backend: {e}")
 
 
+# -----------------
+# Runtime threads
+# -----------------
+
+_Q: Optional["queue.Queue[Dict[str, Any]]"] = None
+_SCALER = None
+_AE_MODEL = None
+_ISO_MODEL = None
+
+
 def reader_thread(q: "queue.Queue[Dict[str, Any]]") -> None:
     print(f"[RT] Following CSV: {FLOW_CSV_PATH}")
     for row in follow_csv(FLOW_CSV_PATH):
@@ -262,36 +279,99 @@ def worker_thread(q: "queue.Queue[Dict[str, Any]]", scaler, ae_model, iso_model)
             payload = build_backend_payload(row, feat_dict, result)
             send_event_to_backend(payload)
         except Exception as e:
-            print(f"[RT][WARN] Failed to process row: {e}")
+            print(f"[RT][WARN] Failed to process flow: {e}")
         finally:
             q.task_done()
 
 
-def main():
+def bootstrap_runtime() -> None:
+    global _Q, _SCALER, _AE_MODEL, _ISO_MODEL
+
+    if _Q is not None:
+        return
+
     print("[RT] Flow-based anomaly detection service starting...")
     print(f"[RT] BACKEND_URL = {BACKEND_URL}")
-    print(f"[RT] FLOW_CSV_PATH = {FLOW_CSV_PATH}")
+    print(f"[RT] INGEST_MODE = {INGEST_MODE}")
 
-    scaler, ae_model, iso_model = load_models()
+    _SCALER, _AE_MODEL, _ISO_MODEL = load_models()
+    _Q = queue.Queue(maxsize=int(os.getenv("QUEUE_MAXSIZE", "5000")))
 
-    q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=int(os.getenv("QUEUE_MAXSIZE", "5000")))
-
-
-    ingest_mode = os.getenv("INGEST_MODE", "csv").lower()  # csv | http
-    t_worker = threading.Thread(target=worker_thread, args=(q, scaler, ae_model, iso_model), daemon=True)
+    t_worker = threading.Thread(target=worker_thread, args=(_Q, _SCALER, _AE_MODEL, _ISO_MODEL), daemon=True)
     t_worker.start()
 
-    if ingest_mode == "http":
-        t_http = threading.Thread(target=start_http_ingest, args=(q,), daemon=True)
-        t_http.start()
-    else:
-        t_reader = threading.Thread(target=reader_thread, args=(q,), daemon=True)
+    if INGEST_MODE in {"csv", "both"}:
+        t_reader = threading.Thread(target=reader_thread, args=(_Q,), daemon=True)
         t_reader.start()
 
 
-    # keep alive
-    while True:
-        time.sleep(5)
+def _enqueue(flow: Dict[str, Any]) -> bool:
+    if _Q is None:
+        return False
+    try:
+        _Q.put_nowait(flow)
+        return True
+    except queue.Full:
+        return False
+
+
+# -----------------
+# HTTP API (url/both mode)
+# -----------------
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "ingest_mode": INGEST_MODE,
+        "queue_size": _Q.qsize() if _Q is not None else None,
+    }
+
+
+@app.post("/flow")
+def ingest_flow(payload: Union[Dict[str, Any], List[Dict[str, Any]]] = Body(...)):
+    """Receive CICFlowMeter flows in realtime (recommended).
+
+    cicflowmeter --url mode will POST a JSON object (a dict) per collected flow.
+    We also accept a list of flows for flexibility.
+    """
+    if _Q is None:
+        raise HTTPException(status_code=503, detail="service not ready")
+
+    items: List[Dict[str, Any]]
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = [payload]
+    else:
+        raise HTTPException(status_code=400, detail="invalid payload")
+
+    accepted = 0
+    dropped = 0
+    for it in items:
+        if not isinstance(it, dict):
+            dropped += 1
+            continue
+        if _enqueue(it):
+            accepted += 1
+        else:
+            dropped += 1
+
+    return {"ok": True, "accepted": accepted, "dropped": dropped}
+
+
+def main():
+    bootstrap_runtime()
+
+    if INGEST_MODE == "csv":
+        # Legacy mode: keep process alive; reader thread does the ingest.
+        while True:
+            time.sleep(5)
+
+    # URL / BOTH mode: expose HTTP endpoint for realtime ingest.
+    print(f"[RT] HTTP listening on {LISTEN_HOST}:{LISTEN_PORT} (/flow)")
+    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level=os.getenv("LOG_LEVEL", "info"))
 
 
 if __name__ == "__main__":

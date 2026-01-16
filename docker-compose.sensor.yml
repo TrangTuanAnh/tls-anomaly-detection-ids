@@ -41,19 +41,28 @@ services:
       - "8000:8000"
     restart: unless-stopped
 
-  cicflowmeter:
-    build: ./cicflowmeter
-    container_name: cicflowmeter-sniffer
+  nfstream:
+    build: ./nfstream
+    container_name: nfstream-sniffer
     network_mode: "host"
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    privileged: true
+    # easiest for sniffing in many environments:
+    # privileged: true
     env_file:
       - .env
     environment:
       CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
-      FLOW_HTTP_URL: http://127.0.0.1:8080/predict
+      # IMPORTANT: use URL mode for realtime
+      # Backward-compatible env var name (from old cicflowmeter service)
+      OUTPUT_MODE: ${CIC_OUTPUT_MODE:-url}
+      FLOW_URL: ${FLOW_URL:-http://127.0.0.1:9000/flow}
+      # Flow split timeouts (seconds)
+      IDLE_TIMEOUT: ${IDLE_TIMEOUT:-10}
+      ACTIVE_TIMEOUT: ${ACTIVE_TIMEOUT:-300}
+      # keep CSV path for debugging (not used in url mode)
+      FLOW_CSV_PATH: /shared/flows/flows.csv
     volumes:
       - ./shared/flows:/shared/flows
     restart: unless-stopped
@@ -65,13 +74,14 @@ services:
       - backend
     env_file:
       - .env
-    ports:
-      - "127.0.0.1:8080:8080"
     environment:
       BACKEND_URL: http://backend:8000
-      INGEST_MODE: http
-      INGEST_HTTP_PORT: 8080
-      INGEST_DEBUG: "true"
+      # Enable HTTP ingest (recommended). You can set INGEST_MODE=both to also tail CSV.
+      INGEST_MODE: ${INGEST_MODE:-url}
+      LISTEN_HOST: 0.0.0.0
+      LISTEN_PORT: 9000
+
+      FLOW_CSV_PATH: /shared/flows/flows.csv
       AE_MODEL_PATH: /app/trained_models/mlp.h5
       SCALER_PATH: /app/trained_models/scaler.pkl
       AE_THRESHOLD: ${AE_THRESHOLD:-0.05}
@@ -81,6 +91,8 @@ services:
       INGEST_HMAC_MAX_AGE_SEC: ${INGEST_HMAC_MAX_AGE_SEC:-120}
       AE_MODEL_SHA256: ${AE_MODEL_SHA256:-}
       SCALER_SHA256: ${SCALER_SHA256:-}
+    ports:
+      - "9000:9000"
     volumes:
       - ./shared/flows:/shared/flows
       - ./python-real-time-service/trained_models:/app/trained_models:ro

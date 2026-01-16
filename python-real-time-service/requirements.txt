@@ -5,3 +5,5 @@ joblib
 tensorflow
 requests
 python-dateutil
+fastapi
+uvicorn[standard]

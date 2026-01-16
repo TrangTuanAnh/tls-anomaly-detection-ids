@@ -1,5 +1,6 @@
 #!/bin/bash
 # Example: run firewall-controller on a firewall host (needs iptables capability)
+
 export DB_HOST="192.168.1.50"   # IP của máy sensor (MySQL)
 export DB_PORT="3306"
 export DB_USER="tls_user"

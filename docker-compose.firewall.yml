@@ -15,7 +15,7 @@ services:
       DB_NAME: ${FW_DB_NAME:-tls_ids}
       IPTABLES_CHAIN: "FORWARD"
       FW_DRY_RUN: "false"
-      # MySQL TLS (khuyến nghị khi firewall-controller connect qua mạng thật) 
+      # --- MySQL TLS (khuyến nghị khi firewall-controller connect qua mạng thật) ---
       # DB_TLS_ENABLED: "true"
       # DB_SSL_CA: "/pki/mysql/ca.pem"
       # DB_SSL_CERT: "/pki/mysql/fw-client.pem"
