@@ -1,5 +1,6 @@
 # python-real-time-service/main.py
 from __future__ import annotations
+from http_ingest import start_http_ingest
 
 import os
 import sys
@@ -275,10 +276,18 @@ def main():
 
     q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=int(os.getenv("QUEUE_MAXSIZE", "5000")))
 
-    t_reader = threading.Thread(target=reader_thread, args=(q,), daemon=True)
+
+    ingest_mode = os.getenv("INGEST_MODE", "csv").lower()  # csv | http
     t_worker = threading.Thread(target=worker_thread, args=(q, scaler, ae_model, iso_model), daemon=True)
-    t_reader.start()
     t_worker.start()
+
+    if ingest_mode == "http":
+        t_http = threading.Thread(target=start_http_ingest, args=(q,), daemon=True)
+        t_http.start()
+    else:
+        t_reader = threading.Thread(target=reader_thread, args=(q,), daemon=True)
+        t_reader.start()
+
 
     # keep alive
     while True:
