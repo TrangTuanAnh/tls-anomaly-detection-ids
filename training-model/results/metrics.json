@@ -1,0 +1,90 @@
+{
+    "overall": {
+        "TPR": 0.8954625096202656,
+        "FPR": 0.002617570718402182,
+        "ROC_AUC": 0.978105942627243,
+        "confusion_matrix": {
+            "tn": 453430,
+            "fp": 1190,
+            "fn": 12768,
+            "tp": 109370
+        }
+    },
+    "per_label": {
+        "BENIGN": {
+            "total_samples": 454620,
+            "correct_detected": 453430,
+            "accuracy": 0.9974
+        },
+        "Bot": {
+            "total_samples": 1966,
+            "correct_detected": 0,
+            "accuracy": 0.0
+        },
+        "DDoS": {
+            "total_samples": 25605,
+            "correct_detected": 25411,
+            "accuracy": 0.9924
+        },
+        "DoS GoldenEye": {
+            "total_samples": 2059,
+            "correct_detected": 2029,
+            "accuracy": 0.9854
+        },
+        "DoS Hulk": {
+            "total_samples": 46215,
+            "correct_detected": 45038,
+            "accuracy": 0.9745
+        },
+        "DoS Slowhttptest": {
+            "total_samples": 5499,
+            "correct_detected": 95,
+            "accuracy": 0.0173
+        },
+        "DoS slowloris": {
+            "total_samples": 5796,
+            "correct_detected": 2256,
+            "accuracy": 0.3892
+        },
+        "FTP-Patator": {
+            "total_samples": 1588,
+            "correct_detected": 1583,
+            "accuracy": 0.9969
+        },
+        "Heartbleed": {
+            "total_samples": 2,
+            "correct_detected": 2,
+            "accuracy": 1.0
+        },
+        "Infiltration": {
+            "total_samples": 7,
+            "correct_detected": 4,
+            "accuracy": 0.5714
+        },
+        "PortScan": {
+            "total_samples": 31786,
+            "correct_detected": 31742,
+            "accuracy": 0.9986
+        },
+        "SSH-Patator": {
+            "total_samples": 1179,
+            "correct_detected": 1143,
+            "accuracy": 0.9695
+        },
+        "Web Attack - Brute Force": {
+            "total_samples": 301,
+            "correct_detected": 60,
+            "accuracy": 0.1993
+        },
+        "Web Attack - SQL Injection": {
+            "total_samples": 4,
+            "correct_detected": 2,
+            "accuracy": 0.5
+        },
+        "Web Attack - XSS": {
+            "total_samples": 131,
+            "correct_detected": 5,
+            "accuracy": 0.0382
+        }
+    }
+}
