@@ -17,6 +17,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+    # Chỉ MySQL được publish ra host/network (để firewall-controller connect).
+    # Các service khác chỉ giao tiếp nội bộ qua Docker network.
+    ports:
+      - "${MYSQL_PUBLIC_BIND:-0.0.0.0}:${MYSQL_PUBLIC_PORT:-3306}:3306"
+    networks:
+      sensor_net:
+        ipv4_address: ${MYSQL_IP:-172.30.0.10}
     restart: unless-stopped
 
   backend:
@@ -37,8 +44,11 @@ services:
       INGEST_HMAC_SECRET: ${INGEST_HMAC_SECRET:-}
       INGEST_HMAC_MAX_AGE_SEC: ${INGEST_HMAC_MAX_AGE_SEC:-120}
       AUTO_BLOCK: ${AUTO_BLOCK:-false}
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
+    networks:
+      sensor_net:
+        ipv4_address: ${BACKEND_IP:-172.30.0.20}
     restart: unless-stopped
 
   nfstream:
@@ -57,7 +67,9 @@ services:
       # IMPORTANT: use URL mode for realtime
       # Backward-compatible env var name (from old cicflowmeter service)
       OUTPUT_MODE: ${CIC_OUTPUT_MODE:-url}
-      FLOW_URL: ${FLOW_URL:-http://127.0.0.1:9000/flow}
+      # Host-mode container không join được Docker DNS network, nên gửi về IP cố định
+      # của python-realtime trong sensor_net. (Override được bằng biến FLOW_URL.)
+      FLOW_URL: ${FLOW_URL:-http://172.30.0.30:9000/flow}
       # Flow split timeouts (seconds)
       IDLE_TIMEOUT: ${IDLE_TIMEOUT:-10}
       ACTIVE_TIMEOUT: ${ACTIVE_TIMEOUT:-300}
@@ -82,18 +94,36 @@ services:
       LISTEN_PORT: 9000
 
       FLOW_CSV_PATH: /shared/flows/flows.csv
+      # Preferred env var name
+      MLP_MODEL_PATH: /app/trained_models/mlp.h5
+      # Backward-compatible env var name (older docs used AE_MODEL_PATH)
       AE_MODEL_PATH: /app/trained_models/mlp.h5
       SCALER_PATH: /app/trained_models/scaler.pkl
-      AE_THRESHOLD: ${AE_THRESHOLD:-0.05}
+      # Threshold for sigmoid score (0..1). Default 0.5 for binary classifier.
+      MLP_THRESHOLD: ${MLP_THRESHOLD:-0.5}
+      # Backward-compatible env var name
+      AE_THRESHOLD: ${MLP_THRESHOLD:-0.5}
       ISO_THRESHOLD: ${ISO_THRESHOLD:--0.1}
       REQUIRE_INGEST_HMAC: ${REQUIRE_INGEST_HMAC:-false}
       INGEST_HMAC_SECRET: ${INGEST_HMAC_SECRET:-}
       INGEST_HMAC_MAX_AGE_SEC: ${INGEST_HMAC_MAX_AGE_SEC:-120}
-      AE_MODEL_SHA256: ${AE_MODEL_SHA256:-}
+      MLP_MODEL_SHA256: ${MLP_MODEL_SHA256:-}
+      # Backward-compatible env var name
+      AE_MODEL_SHA256: ${MLP_MODEL_SHA256:-}
       SCALER_SHA256: ${SCALER_SHA256:-}
-    ports:
-      - "9000:9000"
+    expose:
+      - "9000"
+    networks:
+      sensor_net:
+        ipv4_address: ${RT_IP:-172.30.0.30}
     volumes:
       - ./shared/flows:/shared/flows
       - ./python-real-time-service/trained_models:/app/trained_models:ro
     restart: unless-stopped
+
+networks:
+  sensor_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${SENSOR_NET_SUBNET:-172.30.0.0/24}

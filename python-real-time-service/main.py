@@ -24,12 +24,12 @@ import uvicorn
 from config import (
     FLOW_CSV_PATH,
     BACKEND_URL,
-    AE_THRESHOLD,
+    MLP_THRESHOLD,
     ISO_THRESHOLD,
     REQUIRE_INGEST_HMAC,
     INGEST_HMAC_SECRET,
     INGEST_HMAC_MAX_AGE_SEC,
-    AE_MODEL_SHA256,
+    MLP_MODEL_SHA256,
     SCALER_SHA256,
     INGEST_MODE,
     LISTEN_HOST,
@@ -42,14 +42,57 @@ from feature_extractor import FEATURES, build_feature_vector, extract_flow_meta
 app = FastAPI(title="Flow Realtime Service", version="1.1")
 
 
+class StandardScalerLite:
+    """Portable StandardScaler (mean/scale) fallback.
+
+    This avoids pickle/joblib incompatibilities across numpy/sklearn versions.
+    """
+
+    def __init__(self, feature_names: List[str], mean_: List[float], scale_: List[float]):
+        self.feature_names_in_ = np.array(list(feature_names))
+        self.n_features_in_ = int(len(feature_names))
+        self.mean_ = np.array(mean_, dtype=np.float64)
+        self.scale_ = np.array(scale_, dtype=np.float64)
+        if self.mean_.shape[0] != self.n_features_in_ or self.scale_.shape[0] != self.n_features_in_:
+            raise ValueError("Scaler params length mismatch")
+
+    def transform(self, X):
+        if hasattr(X, "to_numpy"):
+            X = X.to_numpy()
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim != 2 or X.shape[1] != self.n_features_in_:
+            raise ValueError(f"Expected shape (n,{self.n_features_in_}), got {X.shape}")
+        denom = np.where(self.scale_ == 0, 1.0, self.scale_)
+        return (X - self.mean_) / denom
+
+
+def _load_scaler_with_fallback(scaler_path: str):
+    """Try joblib scaler first; fallback to scaler_params.json if present."""
+    try:
+        return _joblib_load_compat(scaler_path)
+    except Exception as e:
+        json_path = os.getenv("SCALER_PARAMS_JSON", "")
+        if not json_path:
+            json_path = os.path.join(os.path.dirname(scaler_path), "scaler_params.json")
+        if os.path.isfile(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                params = json.load(f)
+            return StandardScalerLite(
+                feature_names=params.get("feature_names", FEATURES),
+                mean_=params.get("mean_", []),
+                scale_=params.get("scale_", []),
+            )
+        raise e
+
+
 # -----------------
 # Model utilities
 # -----------------
 
-def _infer_ae_input_dim(ae_model) -> Optional[int]:
-    """Best-effort infer autoencoder expected input dimension."""
+def _infer_model_input_dim(model) -> Optional[int]:
+    """Best-effort infer model expected input dimension."""
     try:
-        shape = getattr(ae_model, "input_shape", None)
+        shape = getattr(model, "input_shape", None)
         if shape and isinstance(shape, (tuple, list)) and len(shape) >= 2:
             dim = shape[-1]
             return int(dim) if dim is not None else None
@@ -57,14 +100,14 @@ def _infer_ae_input_dim(ae_model) -> Optional[int]:
         pass
 
     try:
-        t = ae_model.inputs[0]
+        t = model.inputs[0]
         dim = getattr(t, "shape", None)[-1]
         return int(dim) if dim is not None else None
     except Exception:
         return None
 
 
-def _validate_feature_contract(scaler, ae_model) -> None:
+def _validate_feature_contract(scaler, model) -> None:
     expected_n = len(FEATURES)
 
     n_in = getattr(scaler, "n_features_in_", None)
@@ -83,11 +126,11 @@ def _validate_feature_contract(scaler, ae_model) -> None:
                 "Re-train scaler with the same ordered FEATURES list in feature_extractor.py"
             )
 
-    ae_dim = _infer_ae_input_dim(ae_model)
-    if ae_dim is not None and int(ae_dim) != expected_n:
+    model_dim = _infer_model_input_dim(model)
+    if model_dim is not None and int(model_dim) != expected_n:
         raise RuntimeError(
-            f"Autoencoder input dimension mismatch: expected={expected_n} got={int(ae_dim)}. "
-            f"Provide an autoencoder trained on the exact FEATURES list in feature_extractor.py"
+            f"Model input dimension mismatch: expected={expected_n} got={int(model_dim)}. "
+            f"Provide an MLP model trained on the exact FEATURES list in feature_extractor.py"
         )
 
 
@@ -131,36 +174,40 @@ def _joblib_load_compat(path: str):
 
 
 def load_models():
-    """Load scaler + autoencoder (+ optional isolation forest)."""
+    """Load scaler + MLP classifier (+ optional isolation forest)."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     models_dir = os.path.join(base_dir, "trained_models")
 
     scaler_path = os.getenv("SCALER_PATH", "") or os.path.join(models_dir, "scaler.pkl")
-    ae_path = os.getenv("AE_MODEL_PATH", "") or os.path.join(models_dir, "autoencoder.h5")
+    # Backward-compatible env var name: AE_MODEL_PATH
+    mlp_path = os.getenv("MLP_MODEL_PATH", os.getenv("AE_MODEL_PATH", "")) or os.path.join(models_dir, "mlp.h5")
     iso_path = os.getenv("ISO_MODEL_PATH", "") or os.path.join(models_dir, "isolation_forest.pkl")
 
     if not os.path.isfile(scaler_path):
         raise FileNotFoundError(f"Scaler not found: {scaler_path}")
-    if not os.path.isfile(ae_path):
-        raise FileNotFoundError(f"Autoencoder model not found: {ae_path}")
+    if not os.path.isfile(mlp_path):
+        raise FileNotFoundError(f"MLP model not found: {mlp_path}")
 
-    _check_integrity(ae_path, AE_MODEL_SHA256, "Autoencoder")
+    _check_integrity(mlp_path, MLP_MODEL_SHA256, "MLP model")
     _check_integrity(scaler_path, SCALER_SHA256, "Scaler")
 
-    scaler = _joblib_load_compat(scaler_path)
-    ae_model = load_model(ae_path, compile=False)
+    scaler = _load_scaler_with_fallback(scaler_path)
+    mlp_model = load_model(mlp_path, compile=False)
 
-    _validate_feature_contract(scaler, ae_model)
+    _validate_feature_contract(scaler, mlp_model)
 
     iso_model = None
     if os.path.isfile(iso_path):
         iso_model = _joblib_load_compat(iso_path)
 
-    return scaler, ae_model, iso_model
+    return scaler, mlp_model, iso_model
 
 
-def predict_anomaly(x: np.ndarray, scaler, ae_model, iso_model=None) -> Dict[str, Any]:
-    """Return anomaly decision and scores."""
+def predict_anomaly(x: np.ndarray, scaler, mlp_model, iso_model=None) -> Dict[str, Any]:
+    """Return anomaly decision and scores.
+
+    Primary detector is an MLP classifier (sigmoid output in [0,1]).
+    """
     # If the scaler was fitted with feature names (pandas DataFrame during training),
     # passing a raw ndarray will trigger a warning and makes it easier to accidentally
     # mismatch column order. Convert to a DataFrame with the strict FEATURES order.
@@ -171,9 +218,8 @@ def predict_anomaly(x: np.ndarray, scaler, ae_model, iso_model=None) -> Dict[str
         # Fallback (should rarely happen)
         x_scaled = scaler.transform(x)
 
-    recon = ae_model.predict(x_scaled, verbose=0)
-    err = np.mean((x_scaled - recon) ** 2, axis=1)[0]
-    ae_anom = float(err) > AE_THRESHOLD
+    y_score = float(mlp_model.predict(x_scaled, verbose=0).ravel()[0])
+    mlp_anom = y_score >= float(MLP_THRESHOLD)
 
     iso_score = None
     iso_anom = None
@@ -185,11 +231,11 @@ def predict_anomaly(x: np.ndarray, scaler, ae_model, iso_model=None) -> Dict[str
             iso_score = None
             iso_anom = None
 
-    anomaly = bool(ae_anom) or bool(iso_anom) if iso_anom is not None else bool(ae_anom)
+    anomaly = bool(mlp_anom) or bool(iso_anom) if iso_anom is not None else bool(mlp_anom)
 
     return {
-        "ae_error": float(err),
-        "ae_anom": bool(ae_anom),
+        "mlp_score": float(y_score),
+        "mlp_anom": bool(mlp_anom),
         "iso_score": iso_score,
         "iso_anom": iso_anom,
         "anomaly": anomaly,
@@ -209,8 +255,8 @@ def build_backend_payload(row: Dict[str, Any], feature_dict: Dict[str, float], r
         "dst_ip": meta.dst_ip,
         "dst_port": meta.dst_port,
         "proto": meta.proto,
-        "ae_error": result.get("ae_error"),
-        "ae_anom": bool(result.get("ae_anom", False)),
+        "mlp_score": result.get("mlp_score"),
+        "mlp_anom": bool(result.get("mlp_anom", False)),
         "iso_score": result.get("iso_score"),
         "iso_anom": result.get("iso_anom"),
         "is_anomaly": bool(result.get("anomaly", False)),
@@ -243,7 +289,10 @@ def send_event_to_backend(payload: Dict[str, Any]) -> None:
         return
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=1.5)
+        # Send the exact canonical JSON bytes that were signed.
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        headers = {**headers, "Content-Type": "application/json"}
+        resp = requests.post(url, data=body, headers=headers, timeout=1.5)
         if not resp.ok:
             print(f"[RT][WARN] Backend HTTP {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
@@ -256,7 +305,7 @@ def send_event_to_backend(payload: Dict[str, Any]) -> None:
 
 _Q: Optional["queue.Queue[Dict[str, Any]]"] = None
 _SCALER = None
-_AE_MODEL = None
+_MLP_MODEL = None
 _ISO_MODEL = None
 
 
@@ -269,13 +318,13 @@ def reader_thread(q: "queue.Queue[Dict[str, Any]]") -> None:
             pass
 
 
-def worker_thread(q: "queue.Queue[Dict[str, Any]]", scaler, ae_model, iso_model) -> None:
+def worker_thread(q: "queue.Queue[Dict[str, Any]]", scaler, mlp_model, iso_model) -> None:
     print("[RT] Worker started (feature -> ML -> backend)")
     while True:
         row = q.get()
         try:
             x, feat_dict = build_feature_vector(row)
-            result = predict_anomaly(x, scaler, ae_model, iso_model)
+            result = predict_anomaly(x, scaler, mlp_model, iso_model)
             payload = build_backend_payload(row, feat_dict, result)
             send_event_to_backend(payload)
         except Exception as e:
@@ -285,7 +334,7 @@ def worker_thread(q: "queue.Queue[Dict[str, Any]]", scaler, ae_model, iso_model)
 
 
 def bootstrap_runtime() -> None:
-    global _Q, _SCALER, _AE_MODEL, _ISO_MODEL
+    global _Q, _SCALER, _MLP_MODEL, _ISO_MODEL
 
     if _Q is not None:
         return
@@ -294,10 +343,10 @@ def bootstrap_runtime() -> None:
     print(f"[RT] BACKEND_URL = {BACKEND_URL}")
     print(f"[RT] INGEST_MODE = {INGEST_MODE}")
 
-    _SCALER, _AE_MODEL, _ISO_MODEL = load_models()
+    _SCALER, _MLP_MODEL, _ISO_MODEL = load_models()
     _Q = queue.Queue(maxsize=int(os.getenv("QUEUE_MAXSIZE", "5000")))
 
-    t_worker = threading.Thread(target=worker_thread, args=(_Q, _SCALER, _AE_MODEL, _ISO_MODEL), daemon=True)
+    t_worker = threading.Thread(target=worker_thread, args=(_Q, _SCALER, _MLP_MODEL, _ISO_MODEL), daemon=True)
     t_worker.start()
 
     if INGEST_MODE in {"csv", "both"}:

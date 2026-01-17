@@ -1,29 +1,40 @@
-# ANOMALY DETECTION IN TLS/SSH HANDSHAKES & CERTIFICATES
+# Training (Supervised MLP) for Flow IDS
 
-## MODULE TLS (SENSOR VM)
+Thư mục này dùng để **train mô hình MLP phân loại (benign = 0, anomaly = 1)** trên feature-set kiểu CICFlowMeter.
 
-### Module Structure
+## Feature contract (bắt buộc)
+- Dùng **đúng thứ tự 34 features** (khớp với:
+  - `python-real-time-service/feature_extractor.py` (`FEATURES`)
+  - `backend/main.py` (`FEATURE_NAMES`)
+)
 
-```text
-|- module-tls 
-| |- dataset
-| | |- train.csv -> size: (6728, 16)
-| | |- test.csv -> size: (176 (0) + 39 (1), 16) 
-| |- logs
-| | |- anomaly_test_eve.json
-| | |- normal_test_eve.json
-| | |- train_eve.json
-| |- models 
-| | |- autoencoder_tls.h5*
-| | |- scaler.pkl*
-| | - results
-| | |- pilots -> picture
-| |- scripts-> script tien xu li du lieu
-| |- suricata.yaml 
-| |- README.MD
-| |- requirements.txt
+## Dataset
+- `dataset/supervised_train.csv`
+- `dataset/supervised_test.csv`
 
-*Note: 
-- scaler.pkl: dua data ve dang 0-1 truoc khi dua vao model (bat buoc)
-- autoencoder_tls.h5: model AE hoan thien (300 epochs)
+Yêu cầu:
+- Có cột `y` (0/1)
+- Có cột `Label` (để thống kê theo loại tấn công – tuỳ dataset)
+
+## Train
+```bash
+python scripts/mlp_training.py
 ```
+Output:
+- `models/mlp.h5`
+- `models/scaler.pkl`
+- `models/scaler_params.json` (portable – tránh phụ thuộc pickle version)
+
+## Evaluate
+```bash
+# Có thể override threshold bằng env var
+MLP_THRESHOLD=0.5 python scripts/evaluate.py
+```
+Output:
+- `results/metrics.json`
+- `results/plots/*` (score distribution, ROC curve, confusion matrix)
+
+## Deploy
+Copy 2 file sau sang `python-real-time-service/trained_models/`:
+- `mlp.h5`
+- `scaler.pkl` (hoặc dùng `scaler_params.json` nếu muốn tránh pickle)

@@ -1,4 +1,6 @@
 import os
+import json
+
 import pandas as pd
 import joblib
 import numpy as np
@@ -8,6 +10,8 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import BinaryCrossentropy
+
+from sklearn.preprocessing import StandardScaler
 
 # ===================== CONFIG =====================
 TRAIN_PATH = "dataset/supervised_train.csv"
@@ -19,7 +23,7 @@ BATCH_SIZE = 256
 EPOCHS = 100
 LEARNING_RATE = 0.001
 
-FEATURES_35 = [
+FEATURES_34 = [
     "Packet Length Std",
     "Total Length of Bwd Packets",
     "Subflow Bwd Bytes",
@@ -65,19 +69,27 @@ def main():
     print("[*] Loading datasets")
     
     train_df = pd.read_csv(TRAIN_PATH)
-    X_train = train_df[FEATURES_35]
+    X_train = train_df[FEATURES_34]
     y_train = train_df["y"]
 
-    print("[*] Loading scaler")
-    scaler = joblib.load(SCALER_PATH)
+    # Load scaler if exists, otherwise fit a new one
+    os.makedirs(os.path.dirname(SCALER_PATH), exist_ok=True)
+    if os.path.exists(SCALER_PATH):
+        print("[*] Loading scaler")
+        scaler = joblib.load(SCALER_PATH)
+    else:
+        print("[*] Fitting new StandardScaler")
+        scaler = StandardScaler()
+        scaler.fit(X_train)
+        joblib.dump(scaler, SCALER_PATH)
+        print("[*] Scaler saved to:", SCALER_PATH)
 
     X_train = scaler.transform(X_train)
-    X_test  = scaler.transform(X_test)
 
     print("[*] Building MLP model")
 
     model = Sequential([
-        Dense(100, activation="relu", input_shape=(len(FEATURES_35),)),
+        Dense(100, activation="relu", input_shape=(len(FEATURES_34),)),
         Dense(50, activation="relu"),
         Dense(1, activation="sigmoid")
     ])
@@ -101,6 +113,20 @@ def main():
     model.save(MODEL_OUT)
 
     print("[*] Model saved to:", MODEL_OUT)
+
+    # Export scaler parameters to a portable JSON for deployments that avoid pickle
+    try:
+        params = {
+            "feature_names": FEATURES_34,
+            "mean_": [float(x) for x in getattr(scaler, "mean_", [])],
+            "scale_": [float(x) for x in getattr(scaler, "scale_", [])],
+        }
+        out_json = os.path.join(os.path.dirname(SCALER_PATH), "scaler_params.json")
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(params, f, indent=2)
+        print("[*] Scaler params saved to:", out_json)
+    except Exception as e:
+        print("[!] Cannot export scaler_params.json:", e)
 
 
 if __name__ == "__main__":

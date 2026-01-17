@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, Header, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from sqlalchemy import (
     create_engine,
@@ -159,8 +159,8 @@ class FlowEvent(Base):
     features_json = Column(JSON, nullable=False)
 
     # ML outputs
-    ae_error = Column(Float)
-    ae_anom = Column(Boolean, nullable=False, server_default="0")
+    mlp_score = Column(Float)
+    mlp_anom = Column(Boolean, nullable=False, server_default="0")
     iso_score = Column(Float)
     iso_anom = Column(Boolean)
 
@@ -202,6 +202,7 @@ Base.metadata.create_all(bind=engine)
 # =========================
 
 class FlowEventIn(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
     event_time: datetime
 
     sensor_name: Optional[str] = None
@@ -217,17 +218,15 @@ class FlowEventIn(BaseModel):
     features_json: Dict[str, float] = Field(default_factory=dict)
 
     # ML outputs
-    ae_error: Optional[float] = None
-    ae_anom: Optional[bool] = False
+    mlp_score: Optional[float] = None
+    mlp_anom: Optional[bool] = False
     iso_score: Optional[float] = None
     iso_anom: Optional[bool] = None
 
     is_anomaly: Optional[bool] = False
     verdict: Optional[str] = None
 
-    class Config:
-        orm_mode = True
-        extra = "forbid"
+
 
 
 class FlowEventOut(FlowEventIn):
@@ -336,7 +335,7 @@ async def ingest_event(
 ):
     # Optional: verify signed ingest
     if REQUIRE_INGEST_HMAC:
-        body = payload.json(separators=(",", ":"), sort_keys=True).encode("utf-8")
+        body = payload.json(separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
         verify_hmac_request(
             db=db,
             scope="ingest",
@@ -367,8 +366,8 @@ async def ingest_event(
         dst_port=payload.dst_port,
         proto=payload.proto,
         features_json=features_clean,
-        ae_error=payload.ae_error,
-        ae_anom=bool(payload.ae_anom),
+        mlp_score=payload.mlp_score,
+        mlp_anom=bool(payload.mlp_anom),
         iso_score=payload.iso_score,
         iso_anom=payload.iso_anom,
         is_anomaly=bool(payload.is_anomaly),

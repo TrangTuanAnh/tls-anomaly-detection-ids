@@ -19,7 +19,7 @@ MODEL_PATH  = "models/mlp.h5"
 OUT_PATH    = "results/metrics.json"
 PLOT_DIR    = "results/plots"
 
-FEATURES_35 = [
+FEATURES_34 = [
     "Packet Length Std",
     "Total Length of Bwd Packets",
     "Subflow Bwd Bytes",
@@ -65,7 +65,7 @@ def main():
     print("[*] Loading test dataset")
     df = pd.read_csv(TEST_PATH)
 
-    X = df[FEATURES_35]
+    X = df[FEATURES_34]
     y_true = df["y"].values   # 0 = benign, 1 = anomaly
 
     print(f"    Test samples: {len(df)}")
@@ -78,23 +78,25 @@ def main():
 
     print("[*] Running inference")
     y_score = model.predict(X_scaled, batch_size=1024).ravel()
-    y_pred  = (y_score >= 0.5).astype(int)
+    threshold = float(os.getenv("MLP_THRESHOLD", "0.5"))
+    y_pred  = (y_score >= threshold).astype(int)
 
     df["y_pred"] = y_pred
     df["is_correct"] = (df["y_pred"] == df["y"])
 
-    # ===================== PER-LABEL METRICS =====================
+    # ===================== PER-LABEL METRICS (optional) =====================
     label_stats = {}
-    for label, group in df.groupby("Label"):
-        total = len(group)
-        correct = int(group["is_correct"].sum())
-        accuracy = float(correct / total) if total > 0 else 0.0
-        
-        label_stats[label] = {
-            "total_samples": total,
-            "correct_detected": correct,
-            "accuracy": round(accuracy, 4)
-        }
+    if "Label" in df.columns:
+        for label, group in df.groupby("Label"):
+            total = len(group)
+            correct = int(group["is_correct"].sum())
+            accuracy = float(correct / total) if total > 0 else 0.0
+
+            label_stats[str(label)] = {
+                "total_samples": int(total),
+                "correct_detected": int(correct),
+                "accuracy": round(accuracy, 4),
+            }
 
     # ===================== OVERALL METRICS =====================
     cm = confusion_matrix(y_true, y_pred)
@@ -125,7 +127,7 @@ def main():
     plt.figure(figsize=(8, 5))
     plt.hist(y_score[y_true == 0], bins=100, alpha=0.6, label="Benign", density=True)
     plt.hist(y_score[y_true == 1], bins=100, alpha=0.6, label="Anomaly", density=True)
-    plt.axvline(0.5, color="red", linestyle="--", label="Threshold = 0.5")
+    plt.axvline(threshold, color="red", linestyle="--", label=f"Threshold = {threshold}")
     plt.xlabel("MLP Output Score (Sigmoid)")
     plt.ylabel("Density")
     plt.title("MLP Output Score Distribution")
@@ -135,8 +137,10 @@ def main():
     plt.close()
 
     # 2. ROC Curve
+    fpr_curve, tpr_curve, _ = roc_curve(y_true, y_score)
+
     plt.figure(figsize=(6, 5))
-    plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}")
+    plt.plot(fpr_curve, tpr_curve, label=f"AUC = {auc:.4f}")
     plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")

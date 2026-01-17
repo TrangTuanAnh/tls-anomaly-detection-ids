@@ -14,7 +14,9 @@ INGEST_MODE = os.getenv("INGEST_MODE", "url").strip().lower()
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
 # Thresholds for anomaly decision
-AE_THRESHOLD = float(os.getenv("AE_THRESHOLD", "0.05"))
+# NOTE: this project uses an MLP **classifier** (sigmoid output) as the primary detector.
+# Backward-compatible env var: if MLP_THRESHOLD is not set, fall back to AE_THRESHOLD.
+MLP_THRESHOLD = float(os.getenv("MLP_THRESHOLD", os.getenv("AE_THRESHOLD", "0.5")))
 ISO_THRESHOLD = float(os.getenv("ISO_THRESHOLD", "-0.1"))
 
 # Follow file poll interval (legacy csv mode)
@@ -30,5 +32,6 @@ INGEST_HMAC_SECRET = os.getenv("INGEST_HMAC_SECRET", "")
 INGEST_HMAC_MAX_AGE_SEC = int(os.getenv("INGEST_HMAC_MAX_AGE_SEC", "120"))
 
 # Optional model integrity pinning
-AE_MODEL_SHA256 = os.getenv("AE_MODEL_SHA256", "")
+# Backward-compatible env var: if MLP_MODEL_SHA256 is not set, fall back to AE_MODEL_SHA256.
+MLP_MODEL_SHA256 = os.getenv("MLP_MODEL_SHA256", os.getenv("AE_MODEL_SHA256", ""))
 SCALER_SHA256 = os.getenv("SCALER_SHA256", "")

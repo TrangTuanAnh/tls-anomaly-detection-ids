@@ -31,9 +31,9 @@ CREATE TABLE IF NOT EXISTS flow_events (
     -- Exact training feature set (CIC-style names) stored as JSON
     features_json JSON NOT NULL,
 
-    -- ML outputs
-    ae_error DOUBLE NULL,
-    ae_anom TINYINT(1) NOT NULL DEFAULT 0,
+    -- ML outputs (primary: MLP classifier)
+    mlp_score DOUBLE NULL,
+    mlp_anom TINYINT(1) NOT NULL DEFAULT 0,
     iso_score DOUBLE NULL,
     iso_anom TINYINT(1) NULL,
 

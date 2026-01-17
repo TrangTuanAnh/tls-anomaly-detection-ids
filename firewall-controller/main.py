@@ -6,9 +6,7 @@ import time
 import subprocess
 from typing import Dict, Set, Tuple, Optional
 
-import mysql.connector
 from mysql.connector import pooling
-from dateutil import parser as dtparser
 
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
@@ -16,8 +14,9 @@ DB_USER = os.getenv("DB_USER", "tls_user")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "tls_ids")
 
-IPTABLES_CHAIN = os.getenv("IPTABLES_CHAIN", "FORWARD")
-FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "DROP")  # DROP / REJECT
+IPTABLES_CHAIN = os.getenv("IPTABLES_CHAIN", "FORWARD").strip().upper()
+IPTABLES_BASE_CHAIN = os.getenv("IPTABLES_BASE_CHAIN", "FORWARD").strip().upper()
+FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "DROP").strip().upper()  # DROP / REJECT
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
 
 FW_DRY_RUN = os.getenv("FW_DRY_RUN", "false").lower() == "true"
@@ -41,9 +40,34 @@ def _iptables(args: list[str]) -> Tuple[int, str]:
 
 
 def ensure_chain_exists() -> None:
-    # create chain if not exists (best effort); for built-in chains, it's fine.
-    # We won't create FORWARD/INPUT/OUTPUT.
-    pass
+    """Ensure the configured chain exists.
+
+    - If IPTABLES_CHAIN is a built-in chain (INPUT/OUTPUT/FORWARD), nothing to do.
+    - If it's a custom chain, create it if missing and make sure IPTABLES_BASE_CHAIN
+      jumps to it (best effort).
+    """
+    builtins = {"INPUT", "OUTPUT", "FORWARD"}
+    chain = (IPTABLES_CHAIN or "FORWARD").upper()
+    base_chain = (IPTABLES_BASE_CHAIN or "FORWARD").upper()
+
+    if chain in builtins:
+        return
+
+    # Create custom chain if missing
+    rc, _ = _iptables(["-nL", chain])
+    if rc != 0:
+        rc2, out2 = _iptables(["-N", chain])
+        if rc2 != 0:
+            raise RuntimeError(f"Cannot create iptables chain {chain}: {out2}")
+
+    # Ensure base chain jumps to our custom chain
+    if base_chain not in builtins:
+        # Don't try to create arbitrary base chains
+        base_chain = "FORWARD"
+
+    rcj, _ = _iptables(["-C", base_chain, "-j", chain])
+    if rcj != 0:
+        _iptables(["-I", base_chain, "1", "-j", chain])
 
 
 def rule_exists(ip: str) -> bool:
@@ -119,6 +143,7 @@ def main():
     print(f"[FW] start firewall-controller (dry_run={FW_DRY_RUN})")
     print(f"[FW] db={DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} chain={IPTABLES_CHAIN} target={FIREWALL_TARGET}")
 
+    ensure_chain_exists()
     pool = make_pool()
 
     with pool.get_connection() as conn:
@@ -133,6 +158,8 @@ def main():
             print(f"[FW][WARN] bootstrap failed {ip}: {e}")
 
     # Poll loop
+    last_integrity_check = 0.0
+
     while True:
         try:
             with pool.get_connection() as conn:
@@ -158,8 +185,10 @@ def main():
                     except Exception as e:
                         print(f"[FW][WARN] unblock failed {ip}: {e}")
 
-            # Integrity check: ensure rules still exist (anti-tamper) every 30s
-            if int(time.time()) % 30 == 0:
+            # Integrity check: ensure rules still exist (anti-tamper) every ~30s
+            now = time.time()
+            if now - last_integrity_check >= 30.0:
+                last_integrity_check = now
                 for ip in list(blocked):
                     if not rule_exists(ip):
                         try:

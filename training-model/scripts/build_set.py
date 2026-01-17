@@ -1,4 +1,6 @@
 import os
+import json
+
 import pandas as pd
 import joblib
 from sklearn.model_selection import train_test_split
@@ -21,7 +23,7 @@ UNKNOWN_ATTACKS = {
     "Bot"
 }
 
-FEATURES_35 = [
+FEATURES_34 = [
     "Packet Length Std",
     "Total Length of Bwd Packets",
     "Subflow Bwd Bytes",
@@ -66,13 +68,13 @@ def main():
     attack_df = pd.read_csv(ATTACK_PATH)
 
     # ---------- sanity check ----------
-    missing = set(FEATURES_35) - set(benign_df.columns)
+    missing = set(FEATURES_34) - set(benign_df.columns)
     if missing:
         raise RuntimeError(f"Missing features in dataset: {missing}")
 
     # ---------- keep only selected features ----------
-    benign_df = benign_df[FEATURES_35 + ["Label"]]
-    attack_df = attack_df[FEATURES_35 + ["Label"]]
+    benign_df = benign_df[FEATURES_34 + ["Label"]]
+    attack_df = attack_df[FEATURES_34 + ["Label"]]
 
     # ---------- split BENIGN ----------
     benign_train, benign_test = train_test_split(
@@ -107,12 +109,26 @@ def main():
     test_df["y"]  = (test_df["Label"] != "BENIGN").astype(int)
 
     # ---------- scaler ----------
-    X_train = train_df[FEATURES_35]
+    X_train = train_df[FEATURES_34]
     scaler = StandardScaler()
     scaler.fit(X_train)
 
     os.makedirs(os.path.dirname(SCALER_OUT), exist_ok=True)
     joblib.dump(scaler, SCALER_OUT)
+
+    # Portable scaler params (avoid pickle incompatibility)
+    try:
+        params = {
+            "feature_names": FEATURES_34,
+            "mean_": [float(x) for x in getattr(scaler, "mean_", [])],
+            "scale_": [float(x) for x in getattr(scaler, "scale_", [])],
+        }
+        out_json = os.path.join(os.path.dirname(SCALER_OUT), "scaler_params.json")
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(params, f, indent=2)
+        print("[*] Scaler params saved to:", out_json)
+    except Exception as e:
+        print("[!] Cannot export scaler_params.json:", e)
 
     # ---------- save ----------
     os.makedirs(os.path.dirname(TRAIN_OUT), exist_ok=True)
@@ -121,7 +137,7 @@ def main():
 
     # ---------- debug ----------
     print("\n=========== BUILD SUMMARY ===========")
-    print(f"Features used : {len(FEATURES_35)}")
+    print(f"Features used : {len(FEATURES_34)}")
     print(f"Train samples : {len(train_df)}")
     print(train_df["y"].value_counts())
     print(f"Test samples  : {len(test_df)}")
