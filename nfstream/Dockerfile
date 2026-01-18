@@ -1,4 +1,3 @@
-# Su dung Python 3.11 phien ban slim de container nhe va toi uu
 FROM python:3.11-slim
 
 # Dam bao log Python duoc in ra ngay lap tuc de de dang theo doi va debug
