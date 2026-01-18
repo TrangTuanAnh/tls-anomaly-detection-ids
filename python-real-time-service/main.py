@@ -112,6 +112,41 @@ def predict_anomaly(x: np.ndarray, scaler, mlp_model, iso_model=None) -> Dict[st
         "anomaly": anomaly,
     }
 
+
+def build_backend_payload(
+    flow_row: Dict[str, Any],
+    features_json: Dict[str, float],
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build payload that matches backend FlowEventIn (extra fields are forbidden).
+
+    Backend schema expects:
+      event_time, sensor_name, flow_id, src_ip, src_port, dst_ip, dst_port, proto,
+      features_json, mlp_score, mlp_anom, iso_score, iso_anom, is_anomaly, verdict
+    """
+    sensor_name = os.getenv("SENSOR_NAME")
+
+    meta = extract_flow_meta(flow_row, sensor_name=sensor_name)
+    is_anom = bool(result.get("anomaly"))
+
+    return {
+        "event_time": meta.event_time.isoformat(),
+        "sensor_name": meta.sensor_name,
+        "flow_id": meta.flow_id,
+        "src_ip": meta.src_ip,
+        "src_port": meta.src_port,
+        "dst_ip": meta.dst_ip,
+        "dst_port": meta.dst_port,
+        "proto": meta.proto,
+        "features_json": features_json,
+        "mlp_score": result.get("mlp_score"),
+        "mlp_anom": result.get("mlp_anom"),
+        "iso_score": result.get("iso_score"),
+        "iso_anom": result.get("iso_anom"),
+        "is_anomaly": is_anom,
+        "verdict": "anomaly" if is_anom else "normal",
+    }
+
 # Gui ket qua phan tich ve Backend thong qua HTTP POST kem chu ky HMAC
 def send_event_to_backend(payload: Dict[str, Any]) -> None:
     if not BACKEND_URL: return
@@ -122,13 +157,20 @@ def send_event_to_backend(payload: Dict[str, Any]) -> None:
     if INGEST_HMAC_SECRET:
         ts = str(int(time.time()))
         nonce = secrets.token_hex(16)
-        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        # Must match backend canonical JSON (sort_keys + compact separators + utf-8, and allow non-ascii)
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
         mac = hmac.new(INGEST_HMAC_SECRET.encode("utf-8"), digestmod=hashlib.sha256)
         mac.update(ts.encode("utf-8") + b"." + nonce.encode("utf-8") + b"." + body)
         headers.update({"X-Timestamp": ts, "X-Nonce": nonce, "X-Signature": mac.hexdigest()})
 
     try:
-        requests.post(url, json=payload, headers=headers, timeout=1.5)
+        resp = requests.post(url, json=payload, headers=headers, timeout=2.5)
+        if resp.status_code >= 300:
+            # Print backend error so it's visible in flow-rt logs
+            msg = resp.text
+            if len(msg) > 500:
+                msg = msg[:500] + "..."
+            print(f"[RT][Backend] HTTP {resp.status_code}: {msg}")
     except Exception as e:
         print(f"[RT][Loi] Khong the gui ket qua ve Backend: {e}")
 

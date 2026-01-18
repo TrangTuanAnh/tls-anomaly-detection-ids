@@ -100,8 +100,14 @@ def map_to_cic_features(flow: Dict[str, Any]) -> Dict[str, Any]:
     # Anh xa cac bien thong ke (so goi tin, kich thuoc, toc do)
     cic: Dict[str, float] = {
         "Flow Duration": dur_us,
+        # IMPORTANT: keep Destination Port consistent with CIC features.
+        # Without this, the loop below overwrites the earlier metadata value and the feature becomes 0.0.
+        "Destination Port": float(dst_port),
         "Total Length of Fwd Packets": float(flow.get("src2dst_bytes", 0.0)),
         "Total Length of Bwd Packets": float(flow.get("dst2src_bytes", 0.0)),
+        # Subflow bytes are commonly equal to total bytes in simple flow summaries.
+        "Subflow Fwd Bytes": float(flow.get("src2dst_bytes", 0.0)),
+        "Subflow Bwd Bytes": float(flow.get("dst2src_bytes", 0.0)),
         "Packet Length Mean": float(flow.get("bidirectional_mean_ps", 0.0)),
         "Packet Length Std": float(flow.get("bidirectional_stddev_ps", 0.0)),
         "Flow Bytes/s": float(flow.get("bidirectional_bytes", 0.0)) / dur_s,

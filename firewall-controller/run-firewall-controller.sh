@@ -1,6 +1,5 @@
 #!/bin/bash
 # Script khoi chay Module Firewall Controller tren may chu tuong lua
-
 # Thiet lap dia chi IP cua may Sensor noi cai dat MySQL Database
 export DB_HOST="192.168.1.50"
 export DB_PORT="3306"
