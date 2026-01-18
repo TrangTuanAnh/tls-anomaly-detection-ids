@@ -1,4 +1,8 @@
-# firewall-controller/main.py
+"""
+Firewall Controller: Module tu dong thuc thi cac lenh chan IP
+Co che: Lien tuc quet bang firewall_actions trong MySQL va ap dung vao Iptables
+"""
+
 from __future__ import annotations
 
 import os
@@ -8,6 +12,7 @@ from typing import Dict, Set, Tuple, Optional
 
 from mysql.connector import pooling
 
+# Cau hinh ket noi Database va Iptables tu bien moi truong
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "tls_user")
@@ -16,19 +21,12 @@ DB_NAME = os.getenv("DB_NAME", "tls_ids")
 
 IPTABLES_CHAIN = os.getenv("IPTABLES_CHAIN", "FORWARD").strip().upper()
 IPTABLES_BASE_CHAIN = os.getenv("IPTABLES_BASE_CHAIN", "FORWARD").strip().upper()
-FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "DROP").strip().upper()  # DROP / REJECT
+FIREWALL_TARGET = os.getenv("FIREWALL_TARGET", "DROP").strip().upper()
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
 
 FW_DRY_RUN = os.getenv("FW_DRY_RUN", "false").lower() == "true"
 
-# MySQL TLS (optional)
-DB_TLS_ENABLED = os.getenv("DB_TLS_ENABLED", "false").lower() == "true"
-DB_SSL_CA = os.getenv("DB_SSL_CA", "")
-DB_SSL_CERT = os.getenv("DB_SSL_CERT", "")
-DB_SSL_KEY = os.getenv("DB_SSL_KEY", "")
-DB_SSL_VERIFY_CERT = os.getenv("DB_SSL_VERIFY_CERT", "true").lower() == "true"
-
-
+# Ham thuc thi lenh he thong Iptables thong qua subprocess
 def _iptables(args: list[str]) -> Tuple[int, str]:
     cmd = ["iptables"] + args
     if FW_DRY_RUN:
@@ -38,14 +36,8 @@ def _iptables(args: list[str]) -> Tuple[int, str]:
     out = (p.stdout or "") + (p.stderr or "")
     return p.returncode, out.strip()
 
-
+# Khoi tao Chain rieng trong Iptables de quan ly cac luat chan mot cach tap trung
 def ensure_chain_exists() -> None:
-    """Ensure the configured chain exists.
-
-    - If IPTABLES_CHAIN is a built-in chain (INPUT/OUTPUT/FORWARD), nothing to do.
-    - If it's a custom chain, create it if missing and make sure IPTABLES_BASE_CHAIN
-      jumps to it (best effort).
-    """
     builtins = {"INPUT", "OUTPUT", "FORWARD"}
     chain = (IPTABLES_CHAIN or "FORWARD").upper()
     base_chain = (IPTABLES_BASE_CHAIN or "FORWARD").upper()
@@ -53,28 +45,25 @@ def ensure_chain_exists() -> None:
     if chain in builtins:
         return
 
-    # Create custom chain if missing
     rc, _ = _iptables(["-nL", chain])
     if rc != 0:
         rc2, out2 = _iptables(["-N", chain])
         if rc2 != 0:
             raise RuntimeError(f"Cannot create iptables chain {chain}: {out2}")
 
-    # Ensure base chain jumps to our custom chain
     if base_chain not in builtins:
-        # Don't try to create arbitrary base chains
         base_chain = "FORWARD"
 
     rcj, _ = _iptables(["-C", base_chain, "-j", chain])
     if rcj != 0:
         _iptables(["-I", base_chain, "1", "-j", chain])
 
-
+# Kiem tra xem mot dia chi IP da bi chan trong Iptables hay chua
 def rule_exists(ip: str) -> bool:
     rc, _ = _iptables(["-C", IPTABLES_CHAIN, "-s", ip, "-j", FIREWALL_TARGET])
     return rc == 0
 
-
+# Them luat chan IP vao dau danh sach cua Chain
 def add_rule(ip: str) -> None:
     if rule_exists(ip):
         return
@@ -82,15 +71,14 @@ def add_rule(ip: str) -> None:
     if rc != 0:
         raise RuntimeError(out)
 
-
+# Xoa tat ca cac luat lien quan den mot IP khoi Firewall
 def del_rule(ip: str) -> None:
-    # delete all matching rules (loop until not found)
     while True:
         rc, out = _iptables(["-D", IPTABLES_CHAIN, "-s", ip, "-j", FIREWALL_TARGET])
         if rc != 0:
             break
 
-
+# Thiet lap Connection Pool de toi uu ket noi den Database MySQL
 def make_pool():
     cfg = dict(
         host=DB_HOST,
@@ -100,18 +88,10 @@ def make_pool():
         database=DB_NAME,
         autocommit=True,
     )
-
-    if DB_TLS_ENABLED:
-        cfg["ssl_ca"] = DB_SSL_CA or None
-        cfg["ssl_cert"] = DB_SSL_CERT or None
-        cfg["ssl_key"] = DB_SSL_KEY or None
-        cfg["ssl_verify_cert"] = DB_SSL_VERIFY_CERT
-
     return pooling.MySQLConnectionPool(pool_name="fwpool", pool_size=3, **cfg)
 
-
+# Doc lich su cac hanh dong tu DB de khoi phuc danh sach chan khi khoi dong lai module
 def bootstrap_blocklist(conn) -> Set[str]:
-    """Compute current blocklist by replaying actions in DB."""
     cur = conn.cursor(dictionary=True)
     cur.execute("SELECT id, src_ip, action_type FROM firewall_actions ORDER BY id ASC")
     blocked: Set[str] = set()
@@ -127,7 +107,7 @@ def bootstrap_blocklist(conn) -> Set[str]:
     cur.close()
     return blocked, last_id
 
-
+# Lay cac hanh dong moi nhat chua duoc thuc thi dua vao ID cuoi cung
 def fetch_actions_after(conn, last_id: int):
     cur = conn.cursor(dictionary=True)
     cur.execute(
@@ -138,28 +118,24 @@ def fetch_actions_after(conn, last_id: int):
     cur.close()
     return rows
 
-
 def main():
-    print(f"[FW] start firewall-controller (dry_run={FW_DRY_RUN})")
-    print(f"[FW] db={DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME} chain={IPTABLES_CHAIN} target={FIREWALL_TARGET}")
-
+    print(f"[FW] Bat dau Firewall Controller (dry_run={FW_DRY_RUN})")
     ensure_chain_exists()
     pool = make_pool()
 
     with pool.get_connection() as conn:
         blocked, last_id = bootstrap_blocklist(conn)
 
-    # Apply bootstrap rules
+    # Thuc thi lai cac luat chan da co trong Database
     for ip in sorted(blocked):
         try:
             add_rule(ip)
-            print(f"[FW] bootstrap BLOCK {ip}")
         except Exception as e:
-            print(f"[FW][WARN] bootstrap failed {ip}: {e}")
+            print(f"[FW][WARN] Khong the bootstrap IP {ip}: {e}")
 
-    # Poll loop
     last_integrity_check = 0.0
 
+    # Vong lap chinh: Kiem tra hanh dong moi tu DB moi 1 giay
     while True:
         try:
             with pool.get_connection() as conn:
@@ -174,34 +150,30 @@ def main():
                     try:
                         add_rule(ip)
                         blocked.add(ip)
-                        print(f"[FW] BLOCK {ip} (id={last_id})")
+                        print(f"[FW] DA CHAN IP: {ip}")
                     except Exception as e:
-                        print(f"[FW][WARN] block failed {ip}: {e}")
+                        print(f"[FW][WARN] Loi khi chan {ip}: {e}")
                 elif act == "UNBLOCK":
                     try:
                         del_rule(ip)
                         blocked.discard(ip)
-                        print(f"[FW] UNBLOCK {ip} (id={last_id})")
+                        print(f"[FW] DA MO CHAN IP: {ip}")
                     except Exception as e:
-                        print(f"[FW][WARN] unblock failed {ip}: {e}")
+                        print(f"[FW][WARN] Loi khi mo chan {ip}: {e}")
 
-            # Integrity check: ensure rules still exist (anti-tamper) every ~30s
+            # Tu dong kiem tra lai (Anti-tamper) moi 30s de dam bao cac luat chan khong bi xoa thu cong
             now = time.time()
             if now - last_integrity_check >= 30.0:
                 last_integrity_check = now
                 for ip in list(blocked):
                     if not rule_exists(ip):
-                        try:
-                            add_rule(ip)
-                            print(f"[FW] re-add missing rule for {ip}")
-                        except Exception as e:
-                            print(f"[FW][WARN] re-add failed {ip}: {e}")
+                        add_rule(ip)
+                        print(f"[FW] Khoi phuc luat chan bi mat cho: {ip}")
 
         except Exception as e:
-            print(f"[FW][WARN] loop error: {e}")
+            print(f"[FW][WARN] Loi vong lap: {e}")
 
         time.sleep(POLL_INTERVAL)
-
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,6 @@
 services:
   db:
+    # Dich vu co so du lieu MySQL 8.0
     image: mysql:8.0
     container_name: flow-mysql
     env_file:
@@ -10,19 +11,17 @@ services:
       MYSQL_USER: ${MYSQL_USER:-tls_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
+      # Luu tru du lieu va cac script khoi tao database
       - ./mysql-data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d
     healthcheck:
-      # NOTE: In Docker, env vars are NOT expanded in exec-form healthchecks ("CMD").
-      # Use CMD-SHELL so $MYSQL_ROOT_PASSWORD expands inside the container.
-      # Using MYSQL_PWD avoids leaking the password via process args.
+      # Kiem tra trang thai MySQL san sang truoc khi cac service khac ket noi
       test: ["CMD-SHELL", "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
       interval: 5s
       timeout: 3s
       retries: 30
-    # Chỉ MySQL được publish ra host/network (để firewall-controller connect).
-    # Các service khác chỉ giao tiếp nội bộ qua Docker network.
     ports:
+      # Mo cong MySQL de cac thanh phan ben ngoai nhu firewall controller co the ket noi
       - "${MYSQL_PUBLIC_BIND:-0.0.0.0}:${MYSQL_PUBLIC_PORT:-3306}:3306"
     networks:
       sensor_net:
@@ -30,9 +29,11 @@ services:
     restart: unless-stopped
 
   backend:
+    # Dich vu xu ly logic chinh cua he thong
     build: ./backend
     container_name: flow-backend
     depends_on:
+      # Chi khoi chay backend khi database da san sang
       db:
         condition: service_healthy
     env_file:
@@ -55,34 +56,30 @@ services:
     restart: unless-stopped
 
   nfstream:
+    # Dich vu thu thap va trich xuat dac trung luu luong mang
     build: ./nfstream
     container_name: nfstream-sniffer
+    # Su dung host mode de bat goi tin truc tiep tu card mang vat ly
     network_mode: "host"
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    # easiest for sniffing in many environments:
-    # privileged: true
     env_file:
       - .env
     environment:
       CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
-      # IMPORTANT: use URL mode for realtime
-      # Backward-compatible env var name (from old cicflowmeter service)
       OUTPUT_MODE: ${CIC_OUTPUT_MODE:-url}
-      # Host-mode container không join được Docker DNS network, nên gửi về IP cố định
-      # của python-realtime trong sensor_net. (Override được bằng biến FLOW_URL.)
+      # Gui du lieu flow den dich vu phan tich thoi gian thuc
       FLOW_URL: ${FLOW_URL:-http://172.30.0.30:9000/flow}
-      # Flow split timeouts (seconds)
       IDLE_TIMEOUT: ${IDLE_TIMEOUT:-10}
       ACTIVE_TIMEOUT: ${ACTIVE_TIMEOUT:-300}
-      # keep CSV path for debugging (not used in url mode)
       FLOW_CSV_PATH: /shared/flows/flows.csv
     volumes:
       - ./shared/flows:/shared/flows
     restart: unless-stopped
 
   python-realtime:
+    # Dich vu phan tich va phat hien xam nhap su dung Machine Learning
     build: ./python-real-time-service
     container_name: flow-rt
     depends_on:
@@ -91,27 +88,22 @@ services:
       - .env
     environment:
       BACKEND_URL: http://backend:8000
-      # Enable HTTP ingest (recommended). You can set INGEST_MODE=both to also tail CSV.
       INGEST_MODE: ${INGEST_MODE:-url}
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: 9000
-
       FLOW_CSV_PATH: /shared/flows/flows.csv
-      # Preferred env var name
+      # Duong dan toi cac mo hinh MLP va Scaler da duoc huan luyen
       MLP_MODEL_PATH: /app/trained_models/mlp.h5
-      # Backward-compatible env var name (older docs used AE_MODEL_PATH)
       AE_MODEL_PATH: /app/trained_models/mlp.h5
       SCALER_PATH: /app/trained_models/scaler.pkl
-      # Threshold for sigmoid score (0..1). Default 0.5 for binary classifier.
+      # Nguong phan loai cho mo hinh hoc may
       MLP_THRESHOLD: ${MLP_THRESHOLD:-0.5}
-      # Backward-compatible env var name
       AE_THRESHOLD: ${MLP_THRESHOLD:-0.5}
       ISO_THRESHOLD: ${ISO_THRESHOLD:--0.1}
       REQUIRE_INGEST_HMAC: ${REQUIRE_INGEST_HMAC:-false}
       INGEST_HMAC_SECRET: ${INGEST_HMAC_SECRET:-}
       INGEST_HMAC_MAX_AGE_SEC: ${INGEST_HMAC_MAX_AGE_SEC:-120}
       MLP_MODEL_SHA256: ${MLP_MODEL_SHA256:-}
-      # Backward-compatible env var name
       AE_MODEL_SHA256: ${MLP_MODEL_SHA256:-}
       SCALER_SHA256: ${SCALER_SHA256:-}
     expose:
@@ -125,6 +117,7 @@ services:
     restart: unless-stopped
 
 networks:
+  # Cau hinh mang noi bo cho cac thanh phan IDS
   sensor_net:
     driver: bridge
     ipam:

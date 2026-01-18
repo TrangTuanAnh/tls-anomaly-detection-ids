@@ -1,12 +1,6 @@
-"""Flow-based Anomaly Detection Backend (FastAPI + MySQL)
-
-Updated design:
-- Sensor extracts flow features using CICFlowMeter.
-- Realtime scoring service sends: flow metadata + ML scores + the *exact* feature set used by training.
-
-Security (kept from original design):
-- Optional HMAC + timestamp + nonce on ingest (anti-tamper + anti-replay)
-- Optional IPS workflow: write firewall_actions when an anomaly is detected
+"""
+Backend he thong phat hien xam nhap IDS dua tren luu luong mang
+Su dung FastAPI de tiep nhan du lieu tu Sensor va luu tru vao MySQL
 """
 
 from __future__ import annotations
@@ -37,12 +31,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-
-# ========================
-# Feature contract
-# ========================
-# The project is **locked** to this exact CIC-style feature set.
-# MUST match the feature order used in training and in `python-real-time-service/feature_extractor.py`.
+# Danh sach 34 dac trung mang trich xuat tu CICFlowMeter
+# Bat buoc dung thu tu nay de trung khop voi mo hinh AI da huan luyen
 FEATURE_NAMES: List[str] = [
     "Packet Length Std",
     "Total Length of Bwd Packets",
@@ -80,7 +70,7 @@ FEATURE_NAMES: List[str] = [
     "Bwd Packets/s",
 ]
 
-
+# Ham xu ly so thuc de loai bo cac gia tri loi nhu vo cung hoac rong
 def _coerce_float(v: Any) -> float:
     try:
         if v is None:
@@ -92,82 +82,59 @@ def _coerce_float(v: Any) -> float:
     except Exception:
         return 0.0
 
-
+# Ham chuan hoa du lieu dau vao de dam bao day du cac dac trung mang
 def clean_features(features_in: Optional[Dict[str, Any]]) -> Dict[str, float]:
-    """Drop any extra keys and fill missing keys with 0.0."""
     src = features_in or {}
     out: Dict[str, float] = {}
     for k in FEATURE_NAMES:
         out[k] = _coerce_float(src.get(k))
     return out
 
-
-# ========================
-# Config
-# ========================
-
+# Doc cau hinh tu bien moi truong cho Database va Bao mat
 DB_HOST = os.getenv("DB_HOST", "db")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_NAME = os.getenv("DB_NAME", os.getenv("MYSQL_DATABASE", "tls_ids"))
 DB_USER = os.getenv("DB_USER", os.getenv("MYSQL_USER", "tls_user"))
 DB_PASSWORD = os.getenv("DB_PASSWORD", os.getenv("MYSQL_PASSWORD", ""))
 
-# Ingest integrity
 REQUIRE_INGEST_HMAC = os.getenv("REQUIRE_INGEST_HMAC", "false").lower() == "true"
 INGEST_HMAC_SECRET = os.getenv("INGEST_HMAC_SECRET", "")
 INGEST_HMAC_MAX_AGE_SEC = int(os.getenv("INGEST_HMAC_MAX_AGE_SEC", "120"))
 NONCE_TTL_SEC = int(os.getenv("NONCE_TTL_SEC", "300"))
 
-# Optional: auto-create firewall action on anomaly
 AUTO_BLOCK = os.getenv("AUTO_BLOCK", "false").lower() == "true"
-AUTO_BLOCK_ACTION = os.getenv("AUTO_BLOCK_ACTION", "BLOCK")  # BLOCK only for now
+AUTO_BLOCK_ACTION = os.getenv("AUTO_BLOCK_ACTION", "BLOCK")
 
-
-# ========================
-# DB setup
-# ========================
-
+# Khoi tao ket noi den co so du lieu MySQL
 dsn = f"mysql+mysqlconnector://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 engine = create_engine(dsn, pool_pre_ping=True, pool_recycle=3600)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
-# =========================
-# SQLAlchemy models
-# =========================
-
+# Bang flow_events: Luu tru thong tin goi tin va ket qua phan loai AI
 class FlowEvent(Base):
     __tablename__ = "flow_events"
 
     id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
-
     event_time = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
-
     sensor_name = Column(String(64))
     flow_id = Column(BigInteger)
-
     src_ip = Column(String(45), nullable=False)
     src_port = Column(Integer)
     dst_ip = Column(String(45), nullable=False)
     dst_port = Column(Integer)
     proto = Column(String(16))
-
-    # Exact training feature set (CIC-style names) stored as JSON
     features_json = Column(JSON, nullable=False)
-
-    # ML outputs
     mlp_score = Column(Float)
     mlp_anom = Column(Boolean, nullable=False, server_default="0")
     iso_score = Column(Float)
     iso_anom = Column(Boolean)
-
     is_anomaly = Column(Boolean, nullable=False, server_default="0")
     verdict = Column(String(16), nullable=False, server_default="normal")
 
-
+# Bang request_nonces: Luu ma ngau nhien de chong tan cong phat lai
 class RequestNonce(Base):
     __tablename__ = "request_nonces"
 
@@ -181,67 +148,47 @@ class RequestNonce(Base):
         UniqueConstraint("scope", "nonce", name="uq_scope_nonce"),
     )
 
-
+# Bang firewall_actions: Luu tru cac lenh chan IP tu dong
 class FirewallAction(Base):
     __tablename__ = "firewall_actions"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     src_ip = Column(String(45), nullable=False)
-    action_type = Column(String(16), nullable=False)  # BLOCK / UNBLOCK
+    action_type = Column(String(16), nullable=False)
     target = Column(String(64))
     description = Column(Text)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
-
-# Ensure tables exist (in case init SQL was skipped)
+# Tao tat ca cac bang vao database MySQL
 Base.metadata.create_all(bind=engine)
 
-
-# =========================
-# Pydantic schemas
-# =========================
-
+# Dinh nghia cau truc du lieu JSON truyen vao va xuat ra cho API
 class FlowEventIn(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
     event_time: datetime
-
     sensor_name: Optional[str] = None
     flow_id: Optional[int] = None
-
     src_ip: str
     src_port: Optional[int] = None
     dst_ip: str
     dst_port: Optional[int] = None
     proto: Optional[str] = None
-
-    # Exact training features (CIC-style names). Backend will drop extras and fill missing with 0.0.
     features_json: Dict[str, float] = Field(default_factory=dict)
-
-    # ML outputs
     mlp_score: Optional[float] = None
     mlp_anom: Optional[bool] = False
     iso_score: Optional[float] = None
     iso_anom: Optional[bool] = None
-
     is_anomaly: Optional[bool] = False
     verdict: Optional[str] = None
-
-
-
 
 class FlowEventOut(FlowEventIn):
     id: int
     created_at: datetime
 
-
-# =========================
-# Helpers
-# =========================
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-
+# Ham cung cap ket noi database cho moi request
 def get_db():
     db = SessionLocal()
     try:
@@ -249,7 +196,7 @@ def get_db():
     finally:
         db.close()
 
-
+# Ham xac thuc HMAC de dam bao du lieu gui tu Sensor khong bi gia mao
 def verify_hmac_request(
     db,
     scope: str,
@@ -272,15 +219,14 @@ def verify_hmac_request(
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid timestamp")
 
+    # Kiem tra do tre thoi gian va Nonce de ngan chan tan cong phat lai
     now = int(time.time())
     if abs(now - ts) > max_age_sec:
         raise HTTPException(status_code=401, detail="Timestamp too old")
 
-    # replay protection: store nonce
     expires_at = utc_now() + timedelta(seconds=ttl_sec)
     nonce = nonce_header.strip()
 
-    # Clean expired nonces opportunistically
     try:
         db.query(RequestNonce).filter(RequestNonce.expires_at < utc_now()).delete()
         db.commit()
@@ -295,6 +241,7 @@ def verify_hmac_request(
         db.rollback()
         raise HTTPException(status_code=401, detail="Nonce already used (replay)")
 
+    # Tinh toan chu ky va so sanh voi du lieu nhan vao
     mac = hmac.new(secret.encode("utf-8"), digestmod=hashlib.sha256)
     mac.update(ts_header.encode("utf-8"))
     mac.update(b".")
@@ -306,25 +253,18 @@ def verify_hmac_request(
     if not hmac.compare_digest(expected, sig_header.strip()):
         raise HTTPException(status_code=401, detail="Bad signature")
 
-
 def compute_verdict(payload: FlowEventIn) -> str:
     if payload.verdict:
         return payload.verdict
     return "anomaly" if payload.is_anomaly else "normal"
 
-
-# =========================
-# FastAPI app
-# =========================
-
 app = FastAPI(title="Flow IDS Backend")
-
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-
+# Endpoint nhan du lieu tu Sensor, kiem tra bao mat va luu vao DB
 @app.post("/api/events", response_model=FlowEventOut)
 async def ingest_event(
     payload: FlowEventIn,
@@ -333,7 +273,6 @@ async def ingest_event(
     x_signature: Optional[str] = Header(None, alias="X-Signature"),
     db=Depends(get_db),
 ):
-    # Optional: verify signed ingest
     if REQUIRE_INGEST_HMAC:
         body = payload.json(separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
         verify_hmac_request(
@@ -348,7 +287,6 @@ async def ingest_event(
             ttl_sec=NONCE_TTL_SEC,
         )
 
-    # Normalize event_time timezone
     et = payload.event_time
     if et.tzinfo is None:
         et = et.replace(tzinfo=timezone.utc)
@@ -356,6 +294,7 @@ async def ingest_event(
     verdict = compute_verdict(payload)
     features_clean = clean_features(payload.features_json)
 
+    # Tao doi tuong ban ghi su kien mang
     row = FlowEvent(
         event_time=et,
         sensor_name=payload.sensor_name,
@@ -375,7 +314,7 @@ async def ingest_event(
     )
     db.add(row)
 
-    # Optional auto-block (write intent to DB; firewall-controller will enforce)
+    # Neu phat hien bat thuong thi tu dong ghi lenh chan vao firewall_actions
     if AUTO_BLOCK and payload.is_anomaly and payload.src_ip:
         act = FirewallAction(
             src_ip=payload.src_ip,
@@ -389,7 +328,7 @@ async def ingest_event(
     db.refresh(row)
     return row
 
-
+# Endpoint lay danh sach su kien mang de hien thi len giao dien quan tri
 @app.get("/api/events", response_model=List[FlowEventOut])
 def list_events(
     only_anomaly: bool = Query(False),

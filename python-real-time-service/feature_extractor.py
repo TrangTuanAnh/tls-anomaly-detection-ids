@@ -1,4 +1,3 @@
-# python-real-time-service/feature_extractor.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,17 +9,16 @@ import math
 import numpy as np
 from dateutil import parser as dtparser
 
+# Su dung Regex de chuan hoa cac khoang trang trong ten cot du lieu
 _ws_re = re.compile(r"\s+")
 
-
-"""Feature extraction for CICFlowMeter(-like) CSV.
-
-This project is **locked** to a strict feature contract (the same columns used in training).
-We keep canonical CIC-style names, but tolerate common header variants from different
-`cicflowmeter` / CICFlowMeter builds via aliases.
+"""
+Module trich xuat dac trung tu du lieu CICFlowMeter
+Module nay dam bao du lieu dau vao luon khop voi cau truc mo hinh AI da huan luyen
 """
 
-# Strict feature contract (34 features) — MUST match training order
+# Danh sach co dinh 34 dac trung mang theo dung thu tu dau vao cua mo hinh ML
+# Bat ky su thay doi nao ve thu tu cung se lam sai lech ket qua du doan
 FEATURES: List[str] = [
     "Packet Length Std",
     "Total Length of Bwd Packets",
@@ -58,8 +56,8 @@ FEATURES: List[str] = [
     "Bwd Packets/s",
 ]
 
-# Header aliases observed across CICFlowMeter(-like) tools.
-# Keys and values are canonical CIC names (same as FEATURES) and acceptable alternates.
+# Danh sach cac ten goi khac nhau cua cung mot dac trung
+# Giup he thong tuong thich voi nhieu phien ban cong cu sniffer khac nhau
 FEATURE_ALIASES: Dict[str, List[str]] = {
     "Destination Port": ["Dst Port", "Dest Port"],
     "Total Backward Packets": ["Total Bwd Packets", "Tot Bwd Pkts"],
@@ -73,17 +71,17 @@ FEATURE_ALIASES: Dict[str, List[str]] = {
     "Init_Win_bytes_backward": ["Init Win bytes backward"],
 }
 
-
+# Ham chuan hoa ten khoa (key) de loai bo khoang trang thua
 def _norm_key(k: str) -> str:
     k = (k or "").strip()
     k = _ws_re.sub(" ", k)
     return k
 
-
 def normalize_row_keys(row: Dict[str, Any]) -> Dict[str, Any]:
     return {_norm_key(k): v for k, v in row.items()}
 
-
+# Ham chuyen doi du lieu sang so thuc va xu ly cac gia tri loi (NaN, Infinity)
+# Dam bao mo hinh AI khong bi loi khi gap du lieu mang bat thuong
 def _to_float(x: Any) -> float:
     if x is None:
         return 0.0
@@ -92,20 +90,15 @@ def _to_float(x: Any) -> float:
             return 0.0
         return float(x)
     s = str(x).strip()
-    if not s:
-        return 0.0
-    # some CICFlowMeter outputs use 'Infinity'
-    if s.lower() in {"inf", "infinity", "+inf", "-inf", "nan"}:
+    if not s or s.lower() in {"inf", "infinity", "+inf", "-inf", "nan"}:
         return 0.0
     try:
         v = float(s)
-        if math.isinf(v) or math.isnan(v):
-            return 0.0
-        return v
+        return 0.0 if math.isinf(v) or math.isnan(v) else v
     except Exception:
         return 0.0
 
-
+# Cau truc du lieu de luu tru thong tin dinh danh cua mot luong du lieu (Flow)
 @dataclass
 class FlowMeta:
     event_time: datetime
@@ -117,12 +110,8 @@ class FlowMeta:
     dst_port: Optional[int]
     proto: Optional[str]
 
-
+# Ham tim kiem gia tri trong hang du lieu dua tren danh sach cac ten cot kha thi
 def _pick(row: Dict[str, Any], keys: List[str]) -> Optional[str]:
-    """Pick first non-empty value among candidate keys.
-
-    Row keys are already whitespace-normalized, but we also do case-insensitive lookup.
-    """
     row_l = {str(k).lower(): v for k, v in row.items()}
     for k in keys:
         kk = _norm_key(k)
@@ -133,11 +122,9 @@ def _pick(row: Dict[str, Any], keys: List[str]) -> Optional[str]:
             return str(v).strip()
     return None
 
-
+# Trich xuat thong tin metadata nhu IP, Port, thoi gian de phuc vu truy vet
 def extract_flow_meta(row_in: Dict[str, Any], sensor_name: Optional[str] = None) -> FlowMeta:
     row = normalize_row_keys(row_in)
-
-    # CICFlowMeter / cicflowmeter commonly outputs these columns
     ts = _pick(row, ["Timestamp", "Flow Start Time", "Start Time", "time", "Time"])
     if ts:
         try:
@@ -149,52 +136,29 @@ def extract_flow_meta(row_in: Dict[str, Any], sensor_name: Optional[str] = None)
     else:
         event_time = datetime.now(timezone.utc)
 
-    flow_id_s = _pick(row, ["Flow ID", "flow_id", "FlowId", "FlowID"])
-    flow_id = None
-    if flow_id_s:
-        try:
-            flow_id = int(float(flow_id_s))
-        except Exception:
-            flow_id = None
-
-    src_ip = _pick(row, ["Source IP", "Src IP", "src_ip", "src"])
-    dst_ip = _pick(row, ["Destination IP", "Dst IP", "dest_ip", "dst"])
-
-    if not src_ip:
-        src_ip = "0.0.0.0"
-    if not dst_ip:
-        dst_ip = "0.0.0.0"
+    src_ip = _pick(row, ["Source IP", "Src IP", "src_ip", "src"]) or "0.0.0.0"
+    dst_ip = _pick(row, ["Destination IP", "Dst IP", "dest_ip", "dst"]) or "0.0.0.0"
 
     src_port_s = _pick(row, ["Source Port", "Src Port", "src_port"])
     dst_port_s = _pick(row, ["Destination Port", "Dst Port", "dest_port"])
 
     def to_int_port(s: Optional[str]) -> Optional[int]:
-        if not s:
-            return None
-        try:
-            return int(float(s))
-        except Exception:
-            return None
-
-    src_port = to_int_port(src_port_s)
-    dst_port = to_int_port(dst_port_s)
-
-    proto = _pick(row, ["Protocol", "proto"])
+        try: return int(float(s)) if s else None
+        except Exception: return None
 
     return FlowMeta(
         event_time=event_time,
         sensor_name=sensor_name,
-        flow_id=flow_id,
+        flow_id=None,
         src_ip=src_ip,
-        src_port=src_port,
+        src_port=to_int_port(src_port_s),
         dst_ip=dst_ip,
-        dst_port=dst_port,
-        proto=proto,
+        dst_port=to_int_port(dst_port_s),
+        proto=_pick(row, ["Protocol", "proto"]),
     )
 
-
+# Chuyen doi mot hang du lieu thich ung sang dung 34 dac trung yeu cau
 def build_feature_dict(row_in: Dict[str, Any]) -> Dict[str, float]:
-    """Extract the exact feature set used for training from one CICFlowMeter CSV row."""
     row = normalize_row_keys(row_in)
     row_l = {str(k).lower(): v for k, v in row.items()}
     out: Dict[str, float] = {}
@@ -213,7 +177,7 @@ def build_feature_dict(row_in: Dict[str, Any]) -> Dict[str, float]:
         out[feat] = _to_float(raw)
     return out
 
-
+# Chuyen doi du lieu sang dang Vector (NumPy array) de dua vao mo hinh Machine Learning
 def build_feature_vector(row_in: Dict[str, Any]) -> Tuple[np.ndarray, Dict[str, float]]:
     feat_dict = build_feature_dict(row_in)
     vec = np.array([feat_dict[f] for f in FEATURES], dtype=np.float32).reshape(1, -1)

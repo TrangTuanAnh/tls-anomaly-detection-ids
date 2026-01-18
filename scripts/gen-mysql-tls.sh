@@ -1,40 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate MySQL TLS assets (CA + server cert with SAN + firewall client cert),
-# plus mysql-conf/ssl.cnf. Optionally patch docker-compose.sensor.yml to mount TLS files.
-#
-# Usage (sensor host, in repo root):
-#   chmod +x scripts/gen-mysql-tls.sh
-#   ./scripts/gen-mysql-tls.sh --sensor-ip 192.168.1.10 --enable-sensor-compose
-#   docker compose -f docker-compose.sensor.yml up -d --force-recreate db
-#
-# Then copy the firewall bundle:
-#   scp -r pki/mysql/fw-bundle <firewall-host>:/path/to/project/pki/mysql/
-#
-# Optional: create a dedicated DB user that MUST present a client cert (REQUIRE X509):
-#   ./scripts/gen-mysql-tls.sh --sensor-ip 192.168.1.10 --enable-sensor-compose --create-fw-user
-#
-# Notes:
-# - The script does NOT store the fw_user password in the repo. It will prompt (hidden) if you use --create-fw-user.
-# - For strict identity verification from firewall host, the MySQL server certificate MUST include the SENSOR IP in SAN.
+# Script tu dong hoa viec khoi tao chung chi TLS bao mat cho MySQL
+# Muc tieu: Ma hoa du lieu va xac thuc danh tinh giua Sensor va Firewall
 
+# Ham thong bao loi va dung chuong trinh
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Kiem tra cac cong cu openssl, awk, sed co san tren he thong hay khong
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
-# Default params
+# Thiet lap cac tham so mac dinh cho ten va thoi han chung chi
 SENSOR_IP=""
 CA_CN="tls-mysql-ca"
 SERVER_CN="tls-mysql"
 FW_CN="fw-controller"
 
+# Thoi han cua cac loai chung chi (ngay)
 DAYS_CA=3650
 DAYS_SERVER=825
 DAYS_CLIENT=30
 
+# Thu muc luu tru chung chi va cau hinh
 OUT_DIR="pki/mysql"
 CONF_DIR="mysql-conf"
 BUNDLE_DIR="pki/mysql/fw-bundle"
@@ -46,6 +35,7 @@ MYSQL_CONTAINER="tls-mysql"
 FW_DB_NAME=""
 FW_DB_USER="fw_user"
 
+# Ham hien thi huong dan su dung script
 print_help() {
   cat <<'EOF'
 scripts/gen-mysql-tls.sh
@@ -74,7 +64,7 @@ Examples:
 EOF
 }
 
-# Parse args
+# Xu ly cac tham so dau vao tu dong lenh
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sensor-ip) SENSOR_IP="${2:-}"; shift 2 ;;
@@ -98,7 +88,7 @@ need_cmd openssl
 need_cmd awk
 need_cmd sed
 
-# Best-effort sensor ip detection if missing
+# Tu dong nhan dien dia chi IP cua Sensor neu nguoi dung khong cung cap
 if [[ -z "${SENSOR_IP}" ]]; then
   if command -v hostname >/dev/null 2>&1; then
     SENSOR_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -108,6 +98,7 @@ fi
 
 umask 077
 
+# Tao cac thu muc luu tru chung chi va cau hinh
 mkdir -p "${OUT_DIR}" "${CONF_DIR}" "${BUNDLE_DIR}"
 
 CA_KEY="${OUT_DIR}/ca.key"
@@ -121,6 +112,7 @@ FW_KEY="${OUT_DIR}/fw-client.key"
 FW_PEM="${OUT_DIR}/fw-client.pem"
 FW_CSR="${OUT_DIR}/fw-client.csr"
 
+# Khoi tao chung chi goc CA neu chua ton tai
 echo "[*] Generating/ensuring CA..."
 if [[ ! -f "${CA_KEY}" || ! -f "${CA_PEM}" ]]; then
   openssl genrsa -out "${CA_KEY}" 4096
@@ -130,6 +122,7 @@ else
   echo "    CA exists: ${CA_PEM}"
 fi
 
+# Tao file cau hinh SAN de xac thuc dung dia chi IP cua may chu, chong gia mao
 echo "[*] Writing server openssl config with SAN (includes SENSOR_IP=${SENSOR_IP})..."
 cat > "${SERVER_CNF}" <<EOF
 [req]
@@ -152,6 +145,7 @@ IP.1  = 127.0.0.1
 IP.2  = ${SENSOR_IP}
 EOF
 
+# Tao khoa va chung chi cho MySQL Server ky xac nhan boi CA
 echo "[*] Generating MySQL server key/cert..."
 if [[ ! -f "${SERVER_KEY}" ]]; then
   openssl genrsa -out "${SERVER_KEY}" 2048
@@ -160,6 +154,7 @@ openssl req -new -key "${SERVER_KEY}" -out "${SERVER_CSR}" -config "${SERVER_CNF
 openssl x509 -req -in "${SERVER_CSR}" -CA "${CA_PEM}" -CAkey "${CA_KEY}" -CAcreateserial \
   -out "${SERVER_PEM}" -days "${DAYS_SERVER}" -sha256 -extensions v3_req -extfile "${SERVER_CNF}"
 
+# Tao khoa va chung chi cho Firewall Client dung de ket noi an toan
 echo "[*] Generating firewall client key/cert..."
 if [[ ! -f "${FW_KEY}" ]]; then
   openssl genrsa -out "${FW_KEY}" 2048
@@ -168,6 +163,7 @@ openssl req -new -key "${FW_KEY}" -out "${FW_CSR}" -subj "/CN=${FW_CN}"
 openssl x509 -req -in "${FW_CSR}" -CA "${CA_PEM}" -CAkey "${CA_KEY}" -CAcreateserial \
   -out "${FW_PEM}" -days "${DAYS_CLIENT}" -sha256
 
+# Tao file cau hinh SSL cho MySQL thiet lap duong dan chung chi ben trong container
 echo "[*] Writing MySQL ssl config: ${CONF_DIR}/ssl.cnf"
 cat > "${CONF_DIR}/ssl.cnf" <<'EOF'
 [mysqld]
@@ -180,18 +176,18 @@ tls_version=TLSv1.2,TLSv1.3
 # require_secure_transport=ON
 EOF
 
-# Build firewall bundle for copying
+# Gom nhom cac file chung chi can thiet vao mot bundle de sao chep sang Firewall host
 echo "[*] Creating firewall bundle: ${BUNDLE_DIR}"
 cp -f "${CA_PEM}" "${BUNDLE_DIR}/ca.pem"
 cp -f "${FW_PEM}" "${BUNDLE_DIR}/fw-client.pem"
 cp -f "${FW_KEY}" "${BUNDLE_DIR}/fw-client.key"
 chmod 600 "${BUNDLE_DIR}/fw-client.key" || true
 
-# Optionally patch docker-compose.sensor.yml
+# Tu dong mo cac dong chu thich mount TLS trong file docker-compose neu co yeu cau
 if [[ "${PATCH_SENSOR_COMPOSE}" == "true" ]]; then
   [[ -f "docker-compose.sensor.yml" ]] || die "docker-compose.sensor.yml not found in current directory (run from repo root)"
   echo "[*] Patching docker-compose.sensor.yml: enabling MySQL TLS mounts"
-  # uncomment the two TLS mount lines if present
+  # Su dung sed de bo comment cac dong mount volume TLS
   sed -i.bak \
     -e 's|^[[:space:]]*# - \./pki/mysql:/etc/mysql/certs:ro|      - ./pki/mysql:/etc/mysql/certs:ro|g' \
     -e 's|^[[:space:]]*# - \./mysql-conf/ssl\.cnf:/etc/mysql/conf\.d/ssl\.cnf:ro|      - ./mysql-conf/ssl.cnf:/etc/mysql/conf.d/ssl.cnf:ro|g' \
@@ -199,11 +195,11 @@ if [[ "${PATCH_SENSOR_COMPOSE}" == "true" ]]; then
   echo "    Backup saved: docker-compose.sensor.yml.bak"
 fi
 
-# Optionally create fw db user (REQUIRE X509)
+# Tao nguoi dung database bat buoc phai co chung chi X509 (REQUIRE X509)
 if [[ "${CREATE_FW_USER}" == "true" ]]; then
   need_cmd docker
 
-  # Read MYSQL_ROOT_PASSWORD and DB name from .env if present
+  # Doc mat khau root va ten DB tu file .env
   if [[ -f ".env" ]]; then
     MYSQL_ROOT_PASSWORD="$(grep -E '^MYSQL_ROOT_PASSWORD=' .env | tail -n1 | cut -d= -f2- | sed 's/^"//;s/"$//' || true)"
     DEFAULT_DB="$(grep -E '^MYSQL_DATABASE=' .env | tail -n1 | cut -d= -f2- | sed 's/^"//;s/"$//' || true)"
@@ -226,6 +222,7 @@ if [[ "${CREATE_FW_USER}" == "true" ]]; then
   echo
   [[ -n "${FW_DB_PASSWORD}" ]] || die "Empty password is not allowed"
 
+  # Thuc thi cau lenh SQL de tao user kem rang buoc xac thuc chung chi
   echo "[*] Creating/updating DB user '${FW_DB_USER}' with REQUIRE X509 on '${FW_DB_NAME}'."
   docker exec -i "${MYSQL_CONTAINER}" mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
 CREATE USER IF NOT EXISTS '${FW_DB_USER}'@'%' IDENTIFIED BY '${FW_DB_PASSWORD}';
@@ -237,11 +234,10 @@ SQL
   echo "[*] Done. Remember to set firewall-controller env:"
   echo "    FW_DB_USER=${FW_DB_USER}"
   echo "    FW_DB_PASSWORD=<the password you just set>"
-  echo "    (and enable DB_TLS_ENABLED + mount ${BUNDLE_DIR} on firewall host)"
 fi
 
 echo
-echo "[✓] Generated:"
+echo "Generated:"
 echo "    CA:            ${CA_PEM}"
 echo "    Server cert:   ${SERVER_PEM} (SAN includes ${SENSOR_IP})"
 echo "    Firewall cert: ${FW_PEM}"
@@ -249,17 +245,6 @@ echo "    MySQL config:  ${CONF_DIR}/ssl.cnf"
 echo "    Firewall bundle directory to copy: ${BUNDLE_DIR}"
 echo
 echo "Next steps:"
-echo "  1) On SENSOR host:"
-echo "     - Ensure docker-compose.sensor.yml mounts are enabled for db:"
-echo "         - ./pki/mysql:/etc/mysql/certs:ro"
-echo "         - ./mysql-conf/ssl.cnf:/etc/mysql/conf.d/ssl.cnf:ro"
-echo "     - Restart db: docker compose -f docker-compose.sensor.yml up -d --force-recreate db"
-echo
-echo "  2) Copy bundle to FIREWALL host, then edit docker-compose.firewall.yml:"
-echo "     - Mount ./pki/mysql/fw-bundle to /pki/mysql (or similar)"
-echo "     - Set DB_HOST=${SENSOR_IP}"
-echo "     - Enable DB_TLS_ENABLED=true and point DB_SSL_* to mounted files"
-echo
-echo "  3) Verify from firewall host with mysql client (optional):"
-echo "     mysql --host=${SENSOR_IP} --user=${FW_DB_USER} --ssl-mode=VERIFY_CA \\"
-echo "       --ssl-ca=ca.pem --ssl-cert=fw-client.pem --ssl-key=fw-client.key -e \"status\""
+echo "  1) On SENSOR host restart db"
+echo "  2) Copy bundle to FIREWALL host"
+echo "  3) Verify from firewall host with mysql client"
