@@ -16,6 +16,8 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r /app/requirements.txt
 
 COPY run.sh /app/run.sh
+RUN sed -i 's/\r$//' /app/run.sh
+
 COPY nfstream_sniffer.py /app/nfstream_sniffer.py
 
 RUN chmod +x /app/run.sh

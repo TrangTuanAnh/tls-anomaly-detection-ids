@@ -1,5 +1,7 @@
 import os
 import json
+import sys
+import types
 import joblib
 import numpy as np
 import pandas as pd
@@ -58,6 +60,69 @@ FEATURES_34 = [
 # =================================================
 
 
+class StandardScalerLite:
+    """Portable StandardScaler (mean/scale only).
+
+    This avoids pickle/joblib incompatibilities across numpy/sklearn versions.
+    """
+
+    def __init__(self, feature_names, mean_, scale_):
+        self.feature_names_in_ = np.array(list(feature_names))
+        self.n_features_in_ = int(len(feature_names))
+        self.mean_ = np.array(mean_, dtype=np.float64)
+        self.scale_ = np.array(scale_, dtype=np.float64)
+
+    def transform(self, X):
+        if hasattr(X, "to_numpy"):
+            X = X.to_numpy()
+        X = np.asarray(X, dtype=np.float64)
+        denom = np.where(self.scale_ == 0, 1.0, self.scale_)
+        return (X - self.mean_) / denom
+
+
+def joblib_load_compat(path: str):
+    """Load joblib artifacts with a small compatibility shim.
+
+    Some pickles reference `numpy._core` (numpy 2.x internal path). Older numpy
+    builds don't expose that module, causing `ModuleNotFoundError`.
+    """
+    try:
+        return joblib.load(path)
+    except (ModuleNotFoundError, ImportError) as e:
+        msg = str(e)
+        if "numpy._core" not in msg:
+            raise
+
+        import numpy.core.multiarray as _ma
+        import numpy.core._multiarray_umath as _mu
+
+        m = types.ModuleType("numpy._core")
+        m.__path__ = []
+        m.multiarray = _ma
+        m._multiarray_umath = _mu
+        sys.modules.setdefault("numpy._core", m)
+        sys.modules.setdefault("numpy._core.multiarray", _ma)
+        sys.modules.setdefault("numpy._core._multiarray_umath", _mu)
+        return joblib.load(path)
+
+
+def load_scaler_with_fallback(scaler_path: str):
+    """Prefer joblib scaler; fall back to models/scaler_params.json if present."""
+    try:
+        return joblib_load_compat(scaler_path)
+    except Exception:
+        json_path = os.path.join(os.path.dirname(scaler_path), "scaler_params.json")
+        if os.path.isfile(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                params = json.load(f)
+            return StandardScalerLite(
+                feature_names=params.get("feature_names", FEATURES_34),
+                mean_=params.get("mean_", []),
+                scale_=params.get("scale_", []),
+            )
+        raise
+
+
 def main():
     os.makedirs(PLOT_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
@@ -71,7 +136,7 @@ def main():
     print(f"    Test samples: {len(df)}")
 
     print("[*] Loading scaler & model")
-    scaler = joblib.load(SCALER_PATH)
+    scaler = load_scaler_with_fallback(SCALER_PATH)
     model  = tf.keras.models.load_model(MODEL_PATH)
 
     X_scaled = scaler.transform(X)
