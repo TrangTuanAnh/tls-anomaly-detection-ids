@@ -169,7 +169,7 @@ curl -s "http://172.30.0.20:8000/api/events?limit=20" | jq '.[0:3]'
 curl -s "http://172.30.0.20:8000/api/events?limit=20&only_anomaly=true" | jq
 ```
 
-> Để có dữ liệu, bạn cần tạo traffic thật trên interface đang capture (mở web, ping, tải file, v.v.).
+> Để có dữ liệu, bạn cần tạo traffic thật trên interface đang capture (mở web, ping, tải file,...).
 
 ### Dừng hệ thống
 
