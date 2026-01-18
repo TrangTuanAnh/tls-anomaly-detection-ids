@@ -1,2 +1,20 @@
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+env/
+ENV/
+
 mysql-data/
-shared/
+
+# Flows runtime output (giữ thư mục nhưng không commit file bên trong)
+shared/flows/*
+!shared/flows/.gitkeep
+!shared/flows/README.md
+
+
