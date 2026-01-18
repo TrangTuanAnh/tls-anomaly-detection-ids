@@ -8,6 +8,14 @@ export DB_USER="tls_user"
 export DB_PASSWORD="1234"
 export DB_NAME="tls_ids"
 
+# (Optional) MySQL TLS 
+# export DB_TLS_ENABLED="true"
+# export DB_SSL_CA="/path/to/ca.pem"
+# export DB_SSL_CERT="/path/to/fw-client.pem"
+# export DB_SSL_KEY="/path/to/fw-client.key"
+# export DB_SSL_VERIFY_CERT="true"
+# export DB_SSL_VERIFY_IDENTITY="false"
+
 # Cau hinh Iptables: Su dung chain FORWARD de chan luu luong di qua firewall
 export IPTABLES_CHAIN="FORWARD"
 

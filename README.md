@@ -336,7 +336,10 @@ DB_SSL_CA=/pki/mysql/ca.pem
 DB_SSL_CERT=/pki/mysql/fw-client.pem
 DB_SSL_KEY=/pki/mysql/fw-client.key
 DB_SSL_VERIFY_CERT=true
+DB_SSL_VERIFY_IDENTITY=false  # bật nếu muốn check SAN/hostname (cần mysql-connector-python đủ mới)
 ```
+
+> Lưu ý: nếu chạy bằng Docker, bạn cần mount thư mục cert vào container firewall-controller (xem `docker-compose.firewall.yml`).
 
 ### 3) Kiểm tra integrity model/scaler (tuỳ chọn)
 

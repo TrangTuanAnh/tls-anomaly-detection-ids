@@ -12,12 +12,44 @@ from typing import Dict, Set, Tuple, Optional
 
 from mysql.connector import pooling
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse common boolean env formats (true/false, 1/0, yes/no, on/off)."""
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _maybe_file(path: Optional[str]) -> Optional[str]:
+    """Return path only if non-empty and exists; otherwise None."""
+    if not path:
+        return None
+    p = str(path).strip()
+    if not p:
+        return None
+    return p if os.path.exists(p) else None
+
 # Cau hinh ket noi Database va Iptables tu bien moi truong
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_USER = os.getenv("DB_USER", "tls_user")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "tls_ids")
+
+# MySQL TLS (optional) 
+# Use the same env names already documented in docker-compose.firewall.yml.
+DB_TLS_ENABLED = _env_bool("DB_TLS_ENABLED", False)
+DB_SSL_CA = os.getenv("DB_SSL_CA", "").strip() or None
+DB_SSL_CERT = os.getenv("DB_SSL_CERT", "").strip() or None
+DB_SSL_KEY = os.getenv("DB_SSL_KEY", "").strip() or None
+
+# Verify server certificate chain against CA (recommended).
+DB_SSL_VERIFY_CERT = _env_bool("DB_SSL_VERIFY_CERT", True)
+
+# Verify host identity (SAN / hostname match). Keep default false for
+# compatibility with older mysql-connector-python versions.
+DB_SSL_VERIFY_IDENTITY = _env_bool("DB_SSL_VERIFY_IDENTITY", False)
 
 IPTABLES_CHAIN = os.getenv("IPTABLES_CHAIN", "FORWARD").strip().upper()
 IPTABLES_BASE_CHAIN = os.getenv("IPTABLES_BASE_CHAIN", "FORWARD").strip().upper()
@@ -88,7 +120,45 @@ def make_pool():
         database=DB_NAME,
         autocommit=True,
     )
-    return pooling.MySQLConnectionPool(pool_name="fwpool", pool_size=3, **cfg)
+
+    if DB_TLS_ENABLED:
+        # Resolve and validate file paths (fail-soft with warnings).
+        ca = _maybe_file(DB_SSL_CA)
+        cert = _maybe_file(DB_SSL_CERT)
+        key = _maybe_file(DB_SSL_KEY)
+
+        if DB_SSL_CA and not ca:
+            print(f"[FW][WARN] DB_SSL_CA not found: {DB_SSL_CA}")
+        if DB_SSL_CERT and not cert:
+            print(f"[FW][WARN] DB_SSL_CERT not found: {DB_SSL_CERT}")
+        if DB_SSL_KEY and not key:
+            print(f"[FW][WARN] DB_SSL_KEY not found: {DB_SSL_KEY}")
+
+        # mysql-connector-python enables TLS when any ssl_* option is present.
+        if ca:
+            cfg["ssl_ca"] = ca
+        if cert:
+            cfg["ssl_cert"] = cert
+        if key:
+            cfg["ssl_key"] = key
+        cfg["ssl_verify_cert"] = bool(DB_SSL_VERIFY_CERT)
+
+        # Optional: verify host identity (requires newer connector).
+        if DB_SSL_VERIFY_IDENTITY:
+            cfg["ssl_verify_identity"] = True
+
+    try:
+        return pooling.MySQLConnectionPool(pool_name="fwpool", pool_size=3, **cfg)
+    except TypeError as e:
+        # Some connector versions don't support ssl_verify_identity.
+        if "ssl_verify_identity" in str(e) and "ssl_verify_identity" in cfg:
+            print(
+                "[FW][WARN] mysql-connector-python does not support ssl_verify_identity; "
+                "continue without identity verification (upgrade connector to enable it)."
+            )
+            cfg.pop("ssl_verify_identity", None)
+            return pooling.MySQLConnectionPool(pool_name="fwpool", pool_size=3, **cfg)
+        raise
 
 # Doc lich su cac hanh dong tu DB de khoi phuc danh sach chan khi khoi dong lai module
 def bootstrap_blocklist(conn) -> Set[str]:
