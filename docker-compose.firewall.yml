@@ -11,7 +11,7 @@ services:
       # IP/hostname của sensor machine nơi MySQL được publish
       DB_HOST: ${FW_DB_HOST:-127.0.0.1}
       DB_PORT: "3306"
-      DB_USER: ${FW_DB_USER:-fw_user}
+      DB_USER: ${FW_DB_USER:-tls_user}
       DB_PASSWORD: ${FW_DB_PASSWORD}
       DB_NAME: ${FW_DB_NAME:-tls_ids}
       IPTABLES_CHAIN: "FORWARD"
@@ -23,7 +23,8 @@ services:
       # DB_SSL_KEY: "/pki/mysql/fw-client.key"
       # DB_SSL_VERIFY_CERT: "true"
       # DB_SSL_VERIFY_IDENTITY: "false"  # bật nếu mysql-connector hỗ trợ
-    volumes:
-      # Mount certs (copy từ sensor host sang firewall host)
-      # - ./pki/mysql:/pki/mysql:ro
+    # Mount certs khi bật DB TLS:
+    # volumes:
+    #   - ./pki/mysql:/pki/mysql:ro
+    volumes: []
     restart: unless-stopped
